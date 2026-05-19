@@ -1594,52 +1594,59 @@ function renderViolations() {
 }
 
 // ========== MIDDLE OFFICE POSITION MANAGEMENT ==========
+// ========== MIDDLE OFFICE POSITION MANAGEMENT ==========
 function renderRiskPositions() {
-  for (const grp of ['etf', 'stock']) {
-    const g = state.groups[grp];
-    const nav = calcNAV(grp);
-    const el = qs(`risk-pos-${grp}`);
-    if (!el) continue;
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups[grp];
+    const nav = calcNAV(grp);
+    const el = qs(`risk-pos-${grp}`);
+    if (!el) continue;
 
-    if (!g.positions.length) {
-      el.innerHTML = '<div class="empty-state" style="padding:16px">尚無持倉</div>';
-      continue;
-    }
+    let html = '';
+    
+    // 判斷是否有持倉
+    if (!g.positions.length) {
+      html = '<div class="empty-state" style="padding:16px">尚無持倉</div>';
+    } else {
+      html = g.positions.map(p => {
+        const s = state.securities[p.symbol];
+        const cur = s ? s.price : p.avgPrice;
+        const pnl = (cur - p.avgPrice) * p.qty;
+        const pnlPct = (cur - p.avgPrice) / p.avgPrice * 100;
+        const mv = cur * p.qty;
+        const wt = nav > 0 ? (mv / nav * 100).toFixed(1) : 0;
+        const cl = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+        return `<div class="order-item">
+          <div class="order-top" style="align-items:flex-start">
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;gap:6px">
+                <span class="order-sym">${p.symbol.replace('.TW','')}</span>
+                <span class="badge badge-${grp}">${grp === 'etf' ? 'ETF' : '個股'}</span>
+              </div>
+              <div class="order-meta">${p.qty} 股 · 均價 ${p.avgPrice.toFixed(p.avgPrice<100?2:0)} · 現價 ${cur.toFixed(cur<100?2:0)}</div>
+              <div class="order-meta">倉位 ${wt}% · <span style="color:${cl}">${pnl>=0?'+':''}${Math.round(pnl).toLocaleString()} (${pct(pnlPct)})</span></div>
+            </div>
+            <div style="text-align:right">
+              <div class="order-amount" style="color:${cl}">${money(mv)}</div>
+              <div style="display:flex;gap:5px;margin-top:6px">
+                <button class="btn btn-sm" onclick="riskPartialClose('${grp}','${p.symbol}',${p.qty})">部分</button>
+                <button class="btn btn-sm btn-danger" onclick="riskCloseAll('${grp}','${p.symbol}',${p.qty})">全倉</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    }
 
-    el.innerHTML = g.positions.map(p => {
-      const s = state.securities[p.symbol];
-      const cur = s ? s.price : p.avgPrice;
-      const pnl = (cur - p.avgPrice) * p.qty;
-      const pnlPct = (cur - p.avgPrice) / p.avgPrice * 100;
-      const mv = cur * p.qty;
-      const wt = nav > 0 ? (mv / nav * 100).toFixed(1) : 0;
-      const cl = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-      return `<div class="order-item">
-        <div class="order-top" style="align-items:flex-start">
-          <div style="flex:1">
-            <div style="display:flex;align-items:center;gap:6px">
-              <span class="order-sym">${p.symbol.replace('.TW','')}</span>
-              <span class="badge badge-${grp}">${grp === 'etf' ? 'ETF' : '個股'}</span>
-            </div>
-            <div class="order-meta">${p.qty} 股 · 均價 ${p.avgPrice.toFixed(p.avgPrice<100?2:0)} · 現價 ${cur.toFixed(cur<100?2:0)}</div>
-            <div class="order-meta">倉位 ${wt}% · <span style="color:${cl}">${pnl>=0?'+':''}${Math.round(pnl).toLocaleString()} (${pct(pnlPct)})</span></div>
-          </div>
-          <div style="text-align:right">
-            <div class="order-amount" style="color:${cl}">${money(mv)}</div>
-            <div style="display:flex;gap:5px;margin-top:6px">
-              <button class="btn btn-sm" onclick="riskPartialClose('${grp}','${p.symbol}',${p.qty})">部分</button>
-              <button class="btn btn-sm btn-danger" onclick="riskCloseAll('${grp}','${p.symbol}',${p.qty})">全倉</button>
-            </div>
-          </div>
-        </div>
-      </div>`;
-    }).join('') + `
-      <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
-        <button class="btn btn-sm btn-danger" onclick="riskCloseGroup('${grp}')">⚠ 整組全部平倉</button>
-      </div>`;
-  }
+    // 無論如何都在底部加上「整組全部平倉」按鈕
+    html += `
+      <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
+        <button class="btn btn-sm btn-danger" onclick="riskCloseGroup('${grp}')">⚠ 整組全部平倉</button>
+      </div>`;
+
+    el.innerHTML = html;
+  }
 }
-
 // Partial close: show qty input modal
 function riskPartialClose(grp, sym, maxQty) {
   const qty = parseInt(prompt(`${sym.replace('.TW','')} 持有 ${maxQty} 股，請輸入平倉數量：`, maxQty));
