@@ -607,7 +607,8 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
           </div>
           <div id="export-area" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
             <div style="font-size:12px;color:var(--text2);margin-bottom:10px" id="export-hint"></div>
-            <button class="btn btn-success btn-full" onclick="exportReport()">📄 匯出績效報告 CSV</button>
+            <button class="btn btn-success btn-full" style="margin-bottom:8px" onclick="exportReport()">📄 匯出績效報告 CSV</button>
+            <button class="btn btn-danger btn-full" id="end-period-btn" style="display:none" onclick="endPeriodAndClear()">⏹ 結束期間並清除所有紀錄</button>
           </div>
         </div>
       </div>
@@ -859,6 +860,7 @@ function setupRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, payload => {
       const o = payload.new;
       if (payload.eventType === 'INSERT') {
+        if (state.orders.find(x => x.id === o.id)) return; // already loaded from DB
         const order = {
           id: o.id, time: o.time, symbol: o.symbol, name: o.name,
           qty: +o.qty, side: o.side, price: +o.price, amount: +o.amount,
@@ -1303,13 +1305,11 @@ function updateLimits() {
   updateAllMetrics();
 }
 
-function resetAll() {
-  if (!confirm('確定重置所有資料？此操作無法復原。')) return;
-  state.groups.etf = mkGroup('ETF 組');
-  state.groups.stock = mkGroup('個股組');
-  state.orders = []; state.pendingApproval = [];
+async function resetAll() {
+  if (!confirm('確定重置所有資料？Supabase 上的訂單紀錄也會一併刪除，此操作無法復原。')) return;
+  await clearOrdersFromDB();
   toast('沙盒已重置，重新開始', 'info');
-  updateAllMetrics(); renderNavChart();
+  updateAllMetrics(); renderNavChart(); renderHistory();
 }
 
 // ========== NAV CHART ==========
@@ -1459,6 +1459,8 @@ function updatePeriodUI() {
     cdEl.style.color = dLeft <= 1 ? 'var(--red)' : 'var(--teal)';
     expArea.style.display = 'block';
     expHint.textContent = '期間進行中，可隨時預覽匯出';
+    const endBtn = qs('end-period-btn');
+    if (endBtn) endBtn.style.display = 'none';
   } else {
     dot.className = 'period-dot ended';
     label.textContent = '⏹ 交易期間已結束';
@@ -1466,7 +1468,9 @@ function updatePeriodUI() {
     cdEl.textContent = '已結束';
     cdEl.style.color = 'var(--amber)';
     expArea.style.display = 'block';
-    expHint.textContent = '交易期間已結束，請匯出完整紀錄';
+    expHint.textContent = '交易期間已結束，請先匯出 CSV 再清除紀錄';
+    const endBtn = qs('end-period-btn');
+    if (endBtn) endBtn.style.display = '';
   }
 }
 
@@ -1557,6 +1561,77 @@ function exportReport() {
   toast('CSV 已匯出', 'success');
 }
 
+// ========== LOAD ORDERS FROM DB ==========
+// Silently replay an executed order to rebuild positions/cash (no toasts)
+function replayOrder(order) {
+  const g = state.groups[order.group];
+  if (!g) return;
+  const cost = order.price * order.qty;
+  const taxRate = state.securities[order.symbol]?.grp === 'etf' ? 0.001 : 0.003;
+  const tax = order.side === 'sell' ? Math.round(cost * taxRate) : 0;
+  order.tax = tax;
+  if (order.side === 'buy') {
+    g.cash -= cost;
+    const ex = g.positions.find(p => p.symbol === order.symbol);
+    if (ex) { ex.avgPrice = (ex.avgPrice * ex.qty + cost) / (ex.qty + order.qty); ex.qty += order.qty; }
+    else g.positions.push({ symbol: order.symbol, qty: order.qty, avgPrice: order.price });
+  } else {
+    const pos = g.positions.find(p => p.symbol === order.symbol);
+    if (pos) {
+      g.cash += (cost - tax);
+      pos.qty -= order.qty;
+      if (pos.qty === 0) g.positions = g.positions.filter(p => p.symbol !== order.symbol);
+    }
+  }
+  g.tradeCount++;
+  const nav = calcNAV(order.group);
+  const prev = g.navHistory.length ? g.navHistory[g.navHistory.length-1].nav : INITIAL;
+  g.returns.push((nav - prev) / prev * 100);
+  g.navHistory.push({ t: Date.now(), nav });
+}
+
+async function loadOrdersFromDB() {
+  const { data, error } = await db.from('orders').select('*').order('created_at', { ascending: true });
+  if (error || !data) return;
+  // Reset group state before replay
+  state.groups.etf   = mkGroup('ETF 組');
+  state.groups.stock = mkGroup('個股組');
+  state.orders = [];
+  state.pendingApproval = [];
+  for (const o of data) {
+    const order = {
+      id: o.id, time: o.time, symbol: o.symbol, name: o.name,
+      qty: +o.qty, side: o.side, price: +o.price, amount: +o.amount,
+      group: o.grp, status: o.status, comment: o.comment,
+      scorecard: o.scorecard
+    };
+    state.orders.push(order);
+    if (order.status === 'pending') {
+      state.pendingApproval.push(order);
+    } else if (order.status === 'executed') {
+      replayOrder(order);
+    }
+  }
+}
+
+async function clearOrdersFromDB() {
+  // Delete all rows — requires delete policy on orders table
+  await db.from('orders').delete().neq('id', '___none___');
+  // Reset in-memory state
+  state.groups.etf   = mkGroup('ETF 組');
+  state.groups.stock = mkGroup('個股組');
+  state.orders = [];
+  state.pendingApproval = [];
+}
+
+async function endPeriodAndClear() {
+  if (!confirm('確定結束交易期間並清除所有紀錄？\n建議先匯出 CSV 再執行此操作。')) return;
+  await clearOrdersFromDB();
+  clearPeriod();
+  toast('交易期間已結束，紀錄已清除', 'info');
+  updateAllMetrics(); renderNavChart(); renderHistory();
+}
+
 // ========== INIT ==========
 async function init() {
   // Set default dates: today → +7 days
@@ -1566,8 +1641,10 @@ async function init() {
   if (qs('period-end'))   qs('period-end').value   = next7;
 
   setupRealtime();
-  await fetchInitialPrices();
+  await fetchInitialPrices();   // must load prices first (needed for tax rate in replayOrder)
+  await loadOrdersFromDB();     // then replay orders to rebuild state
   updateAllMetrics();
+  renderNavChart();
   await triggerPriceUpdate();
   setInterval(triggerPriceUpdate, 10000);
 }
