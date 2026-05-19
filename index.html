@@ -197,6 +197,14 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
 .rule-clock.open-dot .dot{background:var(--green);animation:pulse 2s infinite}
 .rule-clock.close-dot .dot{background:var(--amber)}
 /* ── Settlement section in pending list ── */
+.violation-item{
+  padding:11px 14px;border-bottom:1px solid var(--border);
+}
+.violation-item:last-child{border-bottom:none}
+.violation-title{font-size:13px;font-weight:600;margin-bottom:3px}
+.violation-title.danger{color:var(--red)}
+.violation-title.warn{color:var(--amber)}
+.violation-desc{font-size:11px;color:var(--text2);margin-bottom:8px;line-height:1.6}
 .settle-section-hdr{
   font-size:10px;font-weight:700;letter-spacing:.8px;color:var(--text3);
   text-transform:uppercase;padding:8px 14px 4px;
@@ -442,7 +450,8 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
     <div class="tb t-trade active" onclick="switchTab('trade')">
       <span class="tb-icon">📊</span>前台
     </div>
-    <div class="tb t-risk" onclick="switchTab('risk')">
+    <div class="tb t-risk" onclick="switchTab('risk')" style="position:relative">
+      <span id="viol-tab-dot" style="display:none;position:absolute;top:8px;right:18px;width:8px;height:8px;border-radius:50%;background:var(--red)"></span>
       <span class="tb-icon">🛡️</span>中後台
     </div>
     <div class="tb t-history" onclick="switchTab('history')">
@@ -549,6 +558,15 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
     <!-- ====== RISK PANEL ====== -->
     <div id="panel-risk" class="panel">
 
+      <!-- Violations Alert -->
+      <div class="card" id="violations-card" style="display:none;border-color:var(--red-bd)">
+        <div class="card-header" style="background:var(--red-bg)">
+          <span class="card-title" style="color:var(--red)">⚠ 風控違規警示</span>
+          <span class="badge badge-rejected" id="violations-count">0 項</span>
+        </div>
+        <div id="violations-list"></div>
+      </div>
+
       <!-- ETF Group -->
       <div class="card">
         <div class="card-header">
@@ -612,6 +630,29 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
               <div class="metric-val neutral" style="font-size:16px" id="stk-sharpe">—</div>
             </div>
           </div>
+        </div>
+      </div>
+
+
+      <!-- Close Positions (Middle Office) -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">持倉管理 — 中後台平倉</span>
+        </div>
+        <div class="card-body" style="padding:0 0 4px">
+          <div style="display:flex;border-bottom:1px solid var(--border)">
+            <div class="settle-section-hdr" style="padding:10px 14px 8px;flex:1;border-bottom:none">
+              ETF 組持倉
+            </div>
+          </div>
+          <div id="risk-pos-etf"><div class="empty-state" style="padding:16px">尚無持倉</div></div>
+
+          <div style="display:flex;border-bottom:1px solid var(--border);border-top:1px solid var(--border);margin-top:4px">
+            <div class="settle-section-hdr" style="padding:10px 14px 8px;flex:1;border-bottom:none">
+              個股組持倉
+            </div>
+          </div>
+          <div id="risk-pos-stock"><div class="empty-state" style="padding:16px">尚無持倉</div></div>
         </div>
       </div>
 
@@ -905,7 +946,14 @@ const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS
 const db = supabase.createClient(supabaseUrl, supabaseKey);
 
 // ========== STATE ==========
-const INITIAL = 200_000_000;
+const INITIAL         = 200_000_000;  // 2億
+const RULES = {
+  MAX_SINGLE_COST:  40_000_000,   // 單一標的上限 4,000萬
+  MIN_HOLDINGS:     20_000_000,   // 最低持股成本 2,000萬
+  LOSS_WARN:        10_000_000,   // 累計虧損警戒線 1,000萬 → 停損出清+停止交易
+  LOSS_STOP:        20_000_000,   // 累計虧損停損線 2,000萬 → 須於下一交易日停損
+  POS_LOSS_PCT:     0.30,         // 單一標的未實現虧損 30% 須強制出清
+};
 const state = {
   group: 'etf',           // current active group for trade tab
   histGroup: 'etf',       // current active group for history tab
@@ -1251,6 +1299,8 @@ function openScorecard() {
   const qty = parseInt(qs('order-qty').value) || 0;
   if (!sym) { toast('請先選擇商品','warn'); return; }
   if (!qty || qty < 1) { toast('請輸入有效數量','warn'); return; }
+  const earlyCheck = checkOrderConstraints(sym, qty, state.currentDir, state.group);
+  if (earlyCheck) { toast('⚠ 違反投資限制：' + earlyCheck, 'danger'); return; }
   const s = state.securities[sym];
   const dir = state.currentDir;
   state.scores = {};
@@ -1278,6 +1328,13 @@ async function submitOrder() {
 
   if (g.frozen) { toast('此組別已凍結，無法下單','danger'); closeScorecard(); return; }
   if (Object.keys(state.scores).length < 5) { toast('請完成所有 5 項評分','warn'); return; }
+
+  // ── Rule constraint check ──
+  const constraintErr = checkOrderConstraints(sym, qty, dir, grp);
+  if (constraintErr) {
+    toast('違反投資限制：' + constraintErr, 'danger');
+    return;
+  }
 
   const s = state.securities[sym];
   const total = Object.values(state.scores).reduce((a,b)=>a+b,0);
@@ -1393,6 +1450,288 @@ function executeOrder(order) {
   g.navHistory.push({ t: Date.now(), nav });
 }
 
+// ========== RULE CONSTRAINTS ==========
+
+// Returns error string if order violates a rule, else null
+function checkOrderConstraints(sym, qty, side, grp) {
+  const g = state.groups[grp];
+  const s = state.securities[sym];
+  if (!s) return null;
+
+  const cumLoss = INITIAL - calcNAV(grp);
+
+  // 累計虧損 > 1,000萬 → 停止所有交易
+  if (cumLoss >= RULES.LOSS_WARN) {
+    return `累計虧損已達 ${money(cumLoss)}，超過 ${money(RULES.LOSS_WARN)} 警戒線，須停止交易並出清所有持股。`;
+  }
+
+  if (side === 'buy') {
+    // 單一標的成本上限 4,000萬
+    const existingPos  = g.positions.find(p => p.symbol === sym);
+    const existingCost = existingPos ? existingPos.avgPrice * existingPos.qty : 0;
+    const newCost      = s.price * qty;
+    if (existingCost + newCost > RULES.MAX_SINGLE_COST) {
+      return `單一標的總成本將達 ${money(existingCost + newCost)}，超過上限 ${money(RULES.MAX_SINGLE_COST)}（4,000萬）。`;
+    }
+  }
+
+  if (side === 'sell') {
+    // 賣出後持股成本不可低於 2,000萬（有持股時才檢查）
+    const totalCost = g.positions.reduce((sum, p) => sum + p.avgPrice * p.qty, 0);
+    const thisCost  = (() => {
+      const p = g.positions.find(x => x.symbol === sym);
+      return p ? p.avgPrice * Math.min(qty, p.qty) : 0;
+    })();
+    if (totalCost > 0 && (totalCost - thisCost) < RULES.MIN_HOLDINGS) {
+      return `賣出後持股總成本將低於最低限制 ${money(RULES.MIN_HOLDINGS)}（2,000萬），不可執行。`;
+    }
+  }
+
+  return null; // no violation
+}
+
+// Scan all positions & groups for violations, return list
+function getViolations() {
+  const violations = [];
+  for (const grp of ['etf','stock']) {
+    const g   = state.groups[grp];
+    const nav = calcNAV(grp);
+    const cumLoss = INITIAL - nav;
+
+    // 累計虧損 > 2,000萬
+    if (cumLoss >= RULES.LOSS_STOP) {
+      violations.push({
+        grp, sym: null, severity: 'danger',
+        type: 'loss_stop',
+        title: `${g.name}：累計虧損超過 2,000萬`,
+        desc: `累計虧損 ${money(cumLoss)}，須於下一個交易日停損。中後台應執行整組平倉。`,
+        action: `riskCloseGroup('${grp}')`,
+        actionLabel: '執行整組平倉'
+      });
+    }
+    // 累計虧損 > 1,000萬
+    else if (cumLoss >= RULES.LOSS_WARN) {
+      violations.push({
+        grp, sym: null, severity: 'danger',
+        type: 'loss_warn',
+        title: `${g.name}：累計虧損超過 1,000萬`,
+        desc: `累計虧損 ${money(cumLoss)}，須於下一個交易日出清所有持股並停止交易。`,
+        action: `riskCloseGroup('${grp}')`,
+        actionLabel: '出清所有持股'
+      });
+    }
+
+    // 單一標的持股成本超過 4,000萬
+    for (const pos of g.positions) {
+      const cost = pos.avgPrice * pos.qty;
+      if (cost > RULES.MAX_SINGLE_COST) {
+        violations.push({
+          grp, sym: pos.symbol, severity: 'danger',
+          type: 'max_cost',
+          title: `${g.name} / ${pos.symbol.replace('.TW','')}：單一標的成本超過 4,000萬`,
+          desc: `持股成本 ${money(cost)}，超過上限 ${money(RULES.MAX_SINGLE_COST)}，須減碼至限額以內。`,
+          action: `riskPartialClose('${grp}','${pos.symbol}',${pos.qty})`,
+          actionLabel: '部分平倉'
+        });
+      }
+
+      // 未實現虧損 > 30%
+      const s = state.securities[pos.symbol];
+      if (s) {
+        const unrealPct = (s.price - pos.avgPrice) / pos.avgPrice;
+        if (unrealPct < -RULES.POS_LOSS_PCT) {
+          violations.push({
+            grp, sym: pos.symbol, severity: 'warn',
+            type: 'pos_loss',
+            title: `${g.name} / ${pos.symbol.replace('.TW','')}：未實現虧損超過 30%`,
+            desc: `未實現虧損 ${(unrealPct*100).toFixed(1)}%（成本 ${money(pos.avgPrice*pos.qty)}），須於下一個交易日強制出清。`,
+            action: `riskCloseAll('${grp}','${pos.symbol}',${pos.qty})`,
+            actionLabel: '強制出清'
+          });
+        }
+      }
+    }
+
+    // 持股成本低於 2,000萬（有持倉才檢查）
+    if (g.positions.length > 0) {
+      const totalCost = g.positions.reduce((sum, p) => sum + p.avgPrice * p.qty, 0);
+      if (totalCost < RULES.MIN_HOLDINGS) {
+        violations.push({
+          grp, sym: null, severity: 'warn',
+          type: 'min_holdings',
+          title: `${g.name}：持股成本低於最低限制 2,000萬`,
+          desc: `目前持股成本合計 ${money(totalCost)}，低於最低限制 ${money(RULES.MIN_HOLDINGS)}，須增加持倉。`,
+          action: null, actionLabel: null
+        });
+      }
+    }
+  }
+  return violations;
+}
+
+function renderViolations() {
+  const violations = getViolations();
+  const card = qs('violations-card');
+  const list = qs('violations-list');
+  const badge = qs('violations-count');
+  if (!card || !list) return;
+
+  if (!violations.length) {
+    card.style.display = 'none';
+    const dot=qs('viol-tab-dot'); if(dot) dot.style.display='none';
+    return;
+  }
+  card.style.display = '';
+  badge.textContent = violations.length + ' 項';
+  const dot=qs('viol-tab-dot'); if(dot) dot.style.display='';
+
+  list.innerHTML = violations.map(v => `
+    <div class="violation-item">
+      <div class="violation-title ${v.severity}">${v.severity === 'danger' ? '🔴' : '🟡'} ${v.title}</div>
+      <div class="violation-desc">${v.desc}</div>
+      ${v.action ? `<button class="btn btn-sm ${v.severity==='danger'?'btn-danger':'btn-warn'}" onclick="${v.action}">${v.actionLabel}</button>` : ''}
+    </div>`).join('');
+}
+
+// ========== MIDDLE OFFICE POSITION MANAGEMENT ==========
+function renderRiskPositions() {
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups[grp];
+    const nav = calcNAV(grp);
+    const el = qs(`risk-pos-${grp}`);
+    if (!el) continue;
+
+    if (!g.positions.length) {
+      el.innerHTML = '<div class="empty-state" style="padding:16px">尚無持倉</div>';
+      continue;
+    }
+
+    el.innerHTML = g.positions.map(p => {
+      const s = state.securities[p.symbol];
+      const cur = s ? s.price : p.avgPrice;
+      const pnl = (cur - p.avgPrice) * p.qty;
+      const pnlPct = (cur - p.avgPrice) / p.avgPrice * 100;
+      const mv = cur * p.qty;
+      const wt = nav > 0 ? (mv / nav * 100).toFixed(1) : 0;
+      const cl = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      return `<div class="order-item">
+        <div class="order-top" style="align-items:flex-start">
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span class="order-sym">${p.symbol.replace('.TW','')}</span>
+              <span class="badge badge-${grp}">${grp === 'etf' ? 'ETF' : '個股'}</span>
+            </div>
+            <div class="order-meta">${p.qty} 股 · 均價 ${p.avgPrice.toFixed(p.avgPrice<100?2:0)} · 現價 ${cur.toFixed(cur<100?2:0)}</div>
+            <div class="order-meta">倉位 ${wt}% · <span style="color:${cl}">${pnl>=0?'+':''}${Math.round(pnl).toLocaleString()} (${pct(pnlPct)})</span></div>
+          </div>
+          <div style="text-align:right">
+            <div class="order-amount" style="color:${cl}">${money(mv)}</div>
+            <div style="display:flex;gap:5px;margin-top:6px">
+              <button class="btn btn-sm" onclick="riskPartialClose('${grp}','${p.symbol}',${p.qty})">部分</button>
+              <button class="btn btn-sm btn-danger" onclick="riskCloseAll('${grp}','${p.symbol}',${p.qty})">全倉</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }).join('') + `
+      <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
+        <button class="btn btn-sm btn-danger" onclick="riskCloseGroup('${grp}')">⚠ 整組全部平倉</button>
+      </div>`;
+  }
+}
+
+// Partial close: show qty input modal
+function riskPartialClose(grp, sym, maxQty) {
+  const qty = parseInt(prompt(`${sym.replace('.TW','')} 持有 ${maxQty} 股，請輸入平倉數量：`, maxQty));
+  if (!qty || qty < 1 || qty > maxQty) { toast('數量無效', 'warn'); return; }
+  riskExecuteClose(grp, sym, qty, `中後台部分平倉 × ${qty}`);
+}
+
+async function riskCloseAll(grp, sym, qty) {
+  if (!confirm(`確定平倉 ${sym.replace('.TW','')} 全部 ${qty} 股？\n此操作由中後台直接執行，不經前台審核。`)) return;
+  await riskExecuteClose(grp, sym, qty, '中後台全部平倉');
+}
+
+async function riskCloseGroup(grp) {
+  const g = state.groups[grp];
+  if (!g.positions.length) { toast('此組別無持倉', 'info'); return; }
+  if (!confirm(`確定將 ${g.name} 所有持倉全部平倉？\n此操作不可復原。`)) return;
+  for (const p of [...g.positions]) {
+    await riskExecuteClose(grp, p.symbol, p.qty, '中後台整組平倉', true);
+  }
+  toast(`${g.name} 整組平倉完成`, 'warn');
+  updateAllMetrics();
+}
+
+async function riskExecuteClose(grp, sym, qty, comment, silent = false) {
+  const s = state.securities[sym];
+  if (!s) return;
+  const settlDate = getSettlementDate();
+  const order = {
+    id: uid(), time: nowTime(), symbol: sym, name: s.name,
+    qty, side: 'sell', price: s.price, amount: s.price * qty,
+    grp, status: 'approved', comment,
+    settlement_date: settlDate,
+    settlement_price: null,
+    scorecard: {
+      scores: {1:3,2:3,3:5,4:5,5:3}, total: 19,
+      reasons: {1:'中後台平倉',2:'中後台平倉',3:'風控指令',4:'清空倉位',5:'執行平倉'}
+    }
+  };
+  const { error } = await db.from('orders').insert([order]);
+  if (error) { toast('平倉送單失敗：' + error.message, 'danger'); return; }
+
+  // Add directly to approvedPending (bypass front office review)
+  state.orders.push(order);
+  state.approvedPending.push(order);
+  if (!silent) toast(`平倉指令已送出，結算日：${settlDate}`, 'warn');
+}
+
+// ========== CLOSE POSITION HELPERS ==========
+function prefillClose(sym, maxQty) {
+  // Switch to sell direction and pre-fill the order form
+  const s = state.securities[sym];
+  if (!s) return;
+  if (s.grp !== state.group) setGroup(s.grp);
+  setTimeout(() => {
+    setDir('sell');
+    const sel = qs('order-symbol');
+    if (sel && [...sel.options].some(o => o.value === sym)) {
+      sel.value = sym;
+    }
+    const qtyEl = qs('order-qty');
+    if (qtyEl) qtyEl.value = maxQty;
+    updateOrderPrice();
+    qs('order-symbol').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 50);
+}
+
+async function fullClose(sym, qty) {
+  const grp = state.group;
+  const g = state.groups[grp];
+  if (g.frozen) { toast('此組別已凍結，無法下單', 'danger'); return; }
+  const s = state.securities[sym];
+  if (!s) return;
+  if (!confirm(`確定全部平倉 ${sym.replace('.TW','')} × ${qty} 股？\n將以 ${getSettlementDate()} 收盤價結算。`)) return;
+
+  const settlDate = getSettlementDate();
+  const order = {
+    id: uid(), time: nowTime(), symbol: sym, name: s.name,
+    qty, side: 'sell', price: s.price, amount: s.price * qty,
+    grp, status: 'pending', comment: '全部平倉',
+    settlement_date: settlDate,
+    settlement_price: null,
+    scorecard: {
+      scores: {1:3,2:3,3:5,4:5,5:3},
+      total: 19,
+      reasons: {1:'平倉指令',2:'平倉指令',3:'平倉停利停損',4:'清空倉位',5:'執行平倉'}
+    }
+  };
+  const { error } = await db.from('orders').insert([order]);
+  if (error) toast('平倉送單失敗：' + error.message, 'danger');
+  else toast(`全部平倉指令已送審，結算日：${settlDate}`, 'warn');
+}
+
 // ========== METRICS ==========
 function calcNAV(grp) {
   const g = state.groups[grp];
@@ -1473,6 +1812,8 @@ function updateAllMetrics() {
   setText('pending-badge', state.pendingApproval.length + ' 筆');
   renderPendingList();
   renderPositions();
+  renderRiskPositions();
+  renderViolations();
   updateNavMini();
 }
 
@@ -1519,6 +1860,10 @@ function renderPositions() {
       <div class="pos-detail">
         <div class="pos-detail-item">現價 <span>${cur.toFixed(cur<100?2:0)}</span></div>
         <div class="pos-detail-item">倉位佔比 <span>${wt}%</span></div>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button class="btn btn-sm" style="flex:1" onclick="prefillClose('${p.symbol}',${p.qty})">部分平倉</button>
+        <button class="btn btn-sm btn-danger" style="flex:1" onclick="fullClose('${p.symbol}',${p.qty})">全部平倉</button>
       </div>
     </div>`;
   }).join('');
