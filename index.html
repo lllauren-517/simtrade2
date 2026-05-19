@@ -7,6 +7,7 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root {
   --bg:     #0a0c10;
@@ -300,6 +301,56 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
 .note-box strong{color:var(--amber)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
+
+/* ── Chart modal ── */
+.chart-modal-bg{
+  display:none;position:fixed;inset:0;
+  background:rgba(0,0,0,.8);z-index:200;
+  align-items:flex-end;justify-content:center;
+}
+.chart-modal-bg.open{display:flex}
+.chart-modal{
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:var(--radius) var(--radius) 0 0;
+  width:100%;height:88vh;
+  display:flex;flex-direction:column;
+  animation:slideUp .25s ease;
+}
+.chart-modal-header{
+  padding:12px 16px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;
+}
+.chart-sym-info{flex:1}
+.chart-sym-name{font-family:var(--mono);font-size:16px;font-weight:700}
+.chart-sym-sub{font-size:12px;color:var(--text2);margin-top:1px}
+.chart-price-info{text-align:right}
+.chart-cur-price{font-family:var(--mono);font-size:18px;font-weight:700}
+.chart-cur-chg{font-family:var(--mono);font-size:12px;margin-top:1px}
+.tf-bar{
+  display:flex;gap:4px;padding:10px 16px 8px;
+  border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.tf-btn{
+  padding:5px 12px;border-radius:20px;font-size:12px;font-weight:600;
+  font-family:var(--mono);cursor:pointer;
+  background:var(--bg3);border:1px solid var(--border2);color:var(--text3);
+  transition:all .15s;
+}
+.tf-btn.active{background:var(--blue-bg);color:var(--blue);border-color:rgba(96,165,250,.4)}
+#chart-container{flex:1;min-height:0;position:relative}
+.chart-modal-footer{
+  padding:12px 16px;border-top:1px solid var(--border);flex-shrink:0;
+}
+/* ── Tax bar ── */
+.tax-row{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:8px 0;border-bottom:1px solid var(--border);font-size:13px;
+}
+.tax-row:last-child{border-bottom:none}
+.tax-label{color:var(--text2)}
+.tax-val{font-family:var(--mono);font-weight:600}
+
 /* ── Report ── */
 .attr-bar{display:flex;height:22px;border-radius:6px;overflow:hidden;margin:8px 0}
 .attr-beta{background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:10px;color:#0a0c10;font-weight:700}
@@ -577,6 +628,33 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
         </div>
       </div>
 
+      <!-- Transaction Tax Summary -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">交易稅彙總</span></div>
+        <div class="card-body" style="padding:0 14px">
+          <div class="tax-row">
+            <span class="tax-label">ETF 組 — 已繳交易稅</span>
+            <span class="tax-val" id="tax-etf-amt">$0</span>
+          </div>
+          <div class="tax-row">
+            <span class="tax-label">ETF 稅率佔成交額</span>
+            <span class="tax-val" id="tax-etf-pct" style="color:var(--teal)">0.000%</span>
+          </div>
+          <div class="tax-row">
+            <span class="tax-label">個股組 — 已繳交易稅</span>
+            <span class="tax-val" id="tax-stk-amt">$0</span>
+          </div>
+          <div class="tax-row">
+            <span class="tax-label">個股稅率佔成交額</span>
+            <span class="tax-val" id="tax-stk-pct" style="color:var(--amber)">0.000%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====== HISTORY PANEL ====== -->
+    <div id="panel-history" class="panel">
+
       <!-- Trading Period -->
       <div class="card">
         <div class="card-header">
@@ -613,19 +691,6 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
         </div>
       </div>
 
-      <!-- Reset -->
-      <div class="card">
-        <div class="card-header"><span class="card-title" style="color:var(--red)">重置比賽</span></div>
-        <div class="card-body">
-          <p style="font-size:12px;color:var(--text2);margin-bottom:12px">將所有持倉、訂單與資金歸零，重新開始一場新的模擬賽。</p>
-          <button class="btn btn-danger btn-full" onclick="resetAll()">⚠ 全部重置</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ====== HISTORY PANEL ====== -->
-    <div id="panel-history" class="panel">
-
       <!-- Group filter -->
       <div class="group-toggle">
         <div class="group-btn etf-active" id="hist-etf" onclick="setHistGroup('etf')">ETF 組</div>
@@ -650,10 +715,51 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
       <div class="card">
         <div class="card-header">
           <span class="card-title">訂單記錄</span>
+          <button class="btn btn-sm btn-primary" onclick="exportReport()">📄 匯出 CSV</button>
         </div>
         <div id="order-history-list">
           <div class="empty-state">尚無訂單</div>
         </div>
+      </div>
+
+      <!-- Reset -->
+      <div class="card">
+        <div class="card-header"><span class="card-title" style="color:var(--red)">重置比賽</span></div>
+        <div class="card-body">
+          <p style="font-size:12px;color:var(--text2);margin-bottom:12px">將所有持倉、訂單與資金歸零，重新開始一場新的模擬賽。</p>
+          <button class="btn btn-danger btn-full" onclick="resetAll()">⚠ 全部重置</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== CHART MODAL ====== -->
+<div class="chart-modal-bg" id="modal-chart">
+  <div class="chart-modal">
+    <div class="modal-handle"></div>
+    <div class="chart-modal-header">
+      <div class="chart-sym-info">
+        <div class="chart-sym-name" id="chart-sym-name">—</div>
+        <div class="chart-sym-sub" id="chart-sym-sub">—</div>
+      </div>
+      <div class="chart-price-info">
+        <div class="chart-cur-price" id="chart-cur-price">—</div>
+        <div class="chart-cur-chg" id="chart-cur-chg">—</div>
+      </div>
+      <button class="modal-close" style="margin-left:12px" onclick="closeChartModal()">✕</button>
+    </div>
+    <div class="tf-bar">
+      <div class="tf-btn active" id="tf-1W" onclick="setTf('1W')">1W</div>
+      <div class="tf-btn" id="tf-1M" onclick="setTf('1M')">1M</div>
+      <div class="tf-btn" id="tf-3M" onclick="setTf('3M')">3M</div>
+      <div class="tf-btn" id="tf-6M" onclick="setTf('6M')">6M</div>
+    </div>
+    <div id="chart-container"></div>
+    <div class="chart-modal-footer">
+      <div class="btn-row">
+        <button class="btn" onclick="closeChartModal()">關閉</button>
+        <button class="btn btn-primary" style="flex:2" onclick="selectFromChart()">選擇此商品下單 →</button>
       </div>
     </div>
   </div>
@@ -783,7 +889,7 @@ const state = {
 };
 
 function mkGroup(name) {
-  return { name, cash: INITIAL, positions: [], navHistory: [{t: Date.now(), nav: INITIAL}], frozen: false, peakNAV: INITIAL, maxDD: 0, tradeCount: 0, returns: [] };
+  return { name, cash: INITIAL, positions: [], navHistory: [{t: Date.now(), nav: INITIAL}], frozen: false, peakNAV: INITIAL, maxDD: 0, tradeCount: 0, returns: [], totalTax: 0, totalTurnover: 0 };
 }
 
 // ========== UTILS ==========
@@ -905,7 +1011,7 @@ function renderTickers() {
     const chgRate = s.changeRate ?? 0;
     const clr = chgRate >= 0 ? 'var(--green)' : 'var(--red)';
     const sign = chgRate >= 0 ? '▲' : '▼';
-    html += `<div class="ticker-row" data-symbol="${sym}" onclick="pickSymbol('${sym}')">
+    html += `<div class="ticker-row" data-symbol="${sym}" onclick="openChartModal('${sym}')">
       <div class="ticker-left">
         <div class="ticker-sym">${sym.replace('.TW','')}</div>
         <div class="ticker-name">${s.name}</div>
@@ -914,6 +1020,7 @@ function renderTickers() {
         <div class="ticker-price" style="color:${clr}">${s.price.toFixed(s.price < 100 ? 2 : 0)}</div>
         <div class="ticker-chg" style="color:${clr}">${sign} ${Math.abs(chgRate).toFixed(2)}%</div>
       </div>
+      <div style="color:var(--text3);font-size:18px;padding-left:6px">›</div>
     </div>`;
   }
   qs('ticker-list').innerHTML = html || '<div class="empty-state">無商品資料</div>';
@@ -1127,6 +1234,8 @@ function executeOrder(order) {
   }
   // Store tax on order for CSV export
   order.tax = tax;
+  g.totalTax += tax;
+  if (order.side === 'sell') g.totalTurnover += cost;
   g.tradeCount++;
   const nav = calcNAV(order.group);
   const prev = g.navHistory.length ? g.navHistory[g.navHistory.length-1].nav : INITIAL;
@@ -1203,6 +1312,14 @@ function updateAllMetrics() {
   }
 
   // Pending badge
+  // Tax summary
+  for (const grp of ['etf','stock']) {
+    const g = state.groups[grp];
+    const prefix = grp === 'etf' ? 'etf' : 'stk';
+    setText(`tax-${prefix}-amt`, money(g.totalTax));
+    const taxPct = g.totalTurnover > 0 ? (g.totalTax / g.totalTurnover * 100).toFixed(3) + '%' : '0.000%';
+    setText(`tax-${prefix}-pct`, taxPct);
+  }
   setText('pending-badge', state.pendingApproval.length + ' 筆');
   renderPendingList();
   renderPositions();
@@ -1385,6 +1502,162 @@ function renderHistory() {
     </div>`).join('');
 }
 
+
+// ========== CHART MODAL ==========
+let lwChart = null;
+let chartSeries = null;
+let currentChartSym = null;
+let currentTf = '1W';
+
+// Seeded RNG for consistent simulated data per symbol
+function seededRand(seed) {
+  let s = seed;
+  return function() {
+    s = Math.imul(48271, s) | 0;
+    return (s & 0x7fffffff) / 0x7fffffff;
+  };
+}
+
+function strToSeed(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = Math.imul(31, h) + str.charCodeAt(i) | 0;
+  return Math.abs(h) || 1;
+}
+
+function generateCandles(sym, tf) {
+  const s = state.securities[sym];
+  if (!s) return [];
+  const dayMap = { '1W': 7, '1M': 30, '3M': 90, '6M': 180 };
+  const days = dayMap[tf] || 30;
+  const rand = seededRand(strToSeed(sym + tf));
+  const dailyVol = (s.vol || 0.2) / Math.sqrt(252);
+
+  // Walk backwards from current price to get starting price
+  let price = s.price;
+  for (let i = 0; i < days; i++) price /= (1 + (rand() - 0.5) * dailyVol * 2);
+
+  const data = [];
+  const rand2 = seededRand(strToSeed(sym + tf)); // re-seed for forward walk
+  for (let i = days; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    // Skip weekends
+    if (d.getDay() === 0 || d.getDay() === 6) continue;
+    const dateStr = d.toISOString().slice(0, 10);
+    const move = (rand2() - 0.48) * dailyVol * 2;
+    const open = price;
+    const close = price * (1 + move);
+    const high = Math.max(open, close) * (1 + rand2() * dailyVol * 0.5);
+    const low  = Math.min(open, close) * (1 - rand2() * dailyVol * 0.5);
+    data.push({ time: dateStr, open, high, low, close });
+    price = close;
+  }
+  // Force last candle to match current real price
+  if (data.length > 0) {
+    const last = data[data.length - 1];
+    last.close = s.price;
+    last.high = Math.max(last.high, s.price);
+    last.low  = Math.min(last.low,  s.price);
+  }
+  return data;
+}
+
+function openChartModal(sym) {
+  currentChartSym = sym;
+  currentTf = '1W';
+  const s = state.securities[sym];
+  if (!s) return;
+
+  // Header info
+  qs('chart-sym-name').textContent = sym.replace('.TW','') + '  ' + s.name;
+  qs('chart-sym-sub').textContent = s.grp === 'etf' ? 'ETF · 交易稅 0.1%' : '個股 · 交易稅 0.3%';
+  const clr = (s.changeRate ?? 0) >= 0 ? 'var(--green)' : 'var(--red)';
+  const sign = (s.changeRate ?? 0) >= 0 ? '▲' : '▼';
+  qs('chart-cur-price').textContent = s.price.toFixed(s.price < 100 ? 2 : 0);
+  qs('chart-cur-price').style.color = clr;
+  qs('chart-cur-chg').textContent = sign + ' ' + Math.abs(s.changeRate ?? 0).toFixed(2) + '%';
+  qs('chart-cur-chg').style.color = clr;
+
+  // Timeframe buttons
+  ['1W','1M','3M','6M'].forEach(tf => {
+    const el = qs('tf-' + tf);
+    if (el) el.className = 'tf-btn' + (tf === currentTf ? ' active' : '');
+  });
+
+  qs('modal-chart').classList.add('open');
+  setTimeout(() => buildChart(sym, currentTf), 50); // wait for layout
+}
+
+function buildChart(sym, tf) {
+  const container = qs('chart-container');
+  if (!container) return;
+
+  // Destroy previous chart
+  if (lwChart) { lwChart.remove(); lwChart = null; chartSeries = null; }
+
+  const isDark = true;
+  lwChart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: container.clientHeight,
+    layout: {
+      background: { color: '#12151c' },
+      textColor: '#8892a4',
+    },
+    grid: {
+      vertLines: { color: 'rgba(255,255,255,0.04)' },
+      horzLines: { color: 'rgba(255,255,255,0.04)' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,0.08)' },
+    timeScale: { borderColor: 'rgba(255,255,255,0.08)', timeVisible: true },
+  });
+
+  chartSeries = lwChart.addCandlestickSeries({
+    upColor:      '#34d399',
+    downColor:    '#f87171',
+    borderUpColor:   '#34d399',
+    borderDownColor: '#f87171',
+    wickUpColor:     '#34d399',
+    wickDownColor:   '#f87171',
+  });
+
+  const data = generateCandles(sym, tf);
+  chartSeries.setData(data);
+  lwChart.timeScale().fitContent();
+}
+
+function setTf(tf) {
+  currentTf = tf;
+  ['1W','1M','3M','6M'].forEach(t => {
+    const el = qs('tf-' + t);
+    if (el) el.className = 'tf-btn' + (t === tf ? ' active' : '');
+  });
+  if (currentChartSym) buildChart(currentChartSym, tf);
+}
+
+function closeChartModal() {
+  qs('modal-chart').classList.remove('open');
+  if (lwChart) { lwChart.remove(); lwChart = null; chartSeries = null; }
+}
+
+function selectFromChart() {
+  if (!currentChartSym) return;
+  closeChartModal();
+  // Select this symbol in the order form
+  const sym = currentChartSym;
+  const s = state.securities[sym];
+  if (!s) return;
+  // Switch group if needed
+  if (s.grp !== state.group) setGroup(s.grp);
+  setTimeout(() => {
+    const sel = qs('order-symbol');
+    if (sel && [...sel.options].some(o => o.value === sym)) {
+      sel.value = sym; updateOrderPrice();
+    }
+    // Scroll to order form
+    qs('order-symbol').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 100);
+}
 
 // ========== TRADING PERIOD ==========
 const period = { start: null, end: null };
@@ -1570,6 +1843,8 @@ function replayOrder(order) {
   const taxRate = state.securities[order.symbol]?.grp === 'etf' ? 0.001 : 0.003;
   const tax = order.side === 'sell' ? Math.round(cost * taxRate) : 0;
   order.tax = tax;
+  g.totalTax += tax;
+  if (order.side === 'sell') g.totalTurnover += cost;
   if (order.side === 'buy') {
     g.cash -= cost;
     const ex = g.positions.find(p => p.symbol === order.symbol);
