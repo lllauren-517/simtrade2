@@ -305,6 +305,44 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
 .attr-beta{background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:10px;color:#0a0c10;font-weight:700}
 .attr-alpha{background:var(--green);display:flex;align-items:center;justify-content:center;font-size:10px;color:#0a0c10;font-weight:700}
 .attr-noise{background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text3);font-weight:700}
+
+/* ── Period card ── */
+.period-status{
+  display:flex;align-items:center;gap:8px;
+  background:var(--bg3);border-radius:var(--radius-sm);
+  padding:10px 12px;margin-bottom:12px;
+}
+.period-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.period-dot.not-set{background:var(--text3)}
+.period-dot.active{background:var(--green);animation:pulse 2s infinite}
+.period-dot.ended{background:var(--amber)}
+.period-status-text{font-size:13px;flex:1}
+.period-status-text .sub{font-size:11px;color:var(--text3);margin-top:1px;font-family:var(--mono)}
+.period-countdown{font-family:var(--mono);font-size:13px;font-weight:600;text-align:right}
+
+/* Date inputs */
+input[type="date"]{
+  width:100%;background:var(--bg3);border:1px solid var(--border2);
+  color:var(--text);border-radius:var(--radius-sm);
+  padding:10px 12px;font-family:var(--sans);font-size:14px;
+  -webkit-appearance:none;appearance:none;outline:none;
+  color-scheme:dark;
+}
+input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,165,250,.12)}
+
+/* Report modal */
+.report-section{margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid var(--border)}
+.report-section:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+.report-section h3{font-size:12px;font-weight:700;letter-spacing:.8px;color:var(--text3);text-transform:uppercase;margin-bottom:12px}
+.rpt-metric-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
+.rpt-metric{background:var(--bg3);border-radius:var(--radius-sm);padding:10px 12px}
+.rpt-metric-label{font-size:11px;color:var(--text3);margin-bottom:2px}
+.rpt-metric-val{font-family:var(--mono);font-size:16px;font-weight:600}
+.rpt-trade-row{padding:10px 0;border-bottom:1px solid var(--border);font-size:12px}
+.rpt-trade-row:last-child{border-bottom:none}
+.rpt-trade-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}
+.rpt-trade-sym{font-family:var(--mono);font-size:13px;font-weight:600}
+.rpt-trade-meta{color:var(--text3);font-size:11px}
 </style>
 </head>
 <body>
@@ -324,10 +362,10 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
   <!-- TAB BAR -->
   <nav id="tabbar">
     <div class="tb t-trade active" onclick="switchTab('trade')">
-      <span class="tb-icon">📊</span>交易
+      <span class="tb-icon">📊</span>前台
     </div>
     <div class="tb t-risk" onclick="switchTab('risk')">
-      <span class="tb-icon">🛡️</span>風控
+      <span class="tb-icon">🛡️</span>中後台
     </div>
     <div class="tb t-history" onclick="switchTab('history')">
       <span class="tb-icon">📋</span>記錄
@@ -343,11 +381,11 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
       <!-- Freeze banners -->
       <div id="freeze-etf" class="freeze-banner" style="display:none">
         <span class="freeze-icon">🔒</span>
-        <div class="freeze-text"><strong>ETF 組已凍結</strong><span>請前往風控頁面解除</span></div>
+        <div class="freeze-text"><strong>ETF 組已凍結</strong><span>請前往中後台解除</span></div>
       </div>
       <div id="freeze-stock" class="freeze-banner" style="display:none">
         <span class="freeze-icon">🔒</span>
-        <div class="freeze-text"><strong>個股組已凍結</strong><span>請前往風控頁面解除</span></div>
+        <div class="freeze-text"><strong>個股組已凍結</strong><span>請前往中後台解除</span></div>
       </div>
 
       <!-- Note -->
@@ -442,7 +480,6 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
           <span class="card-title" style="color:var(--teal)">ETF 組</span>
           <div style="display:flex;gap:6px">
             <button class="btn btn-sm btn-success" id="unfreeze-etf" style="display:none" onclick="unfreezeGroup('etf')">解凍</button>
-            <button class="btn btn-sm btn-danger" id="forceclose-etf" onclick="forceClose('etf')">強制平倉</button>
           </div>
         </div>
         <div class="card-body">
@@ -476,7 +513,6 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
           <span class="card-title" style="color:var(--amber)">個股組</span>
           <div style="display:flex;gap:6px">
             <button class="btn btn-sm btn-success" id="unfreeze-stk" style="display:none" onclick="unfreezeGroup('stock')">解凍</button>
-            <button class="btn btn-sm btn-danger" id="forceclose-stk" onclick="forceClose('stock')">強制平倉</button>
           </div>
         </div>
         <div class="card-body">
@@ -541,6 +577,41 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
         </div>
       </div>
 
+      <!-- Trading Period -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">📅 模擬交易期間</span>
+        </div>
+        <div class="card-body">
+          <div class="period-status">
+            <div class="period-dot not-set" id="period-dot"></div>
+            <div class="period-status-text">
+              <div id="period-status-label">尚未設定交易期間</div>
+              <div class="sub" id="period-status-sub">請選擇開始與結束日期</div>
+            </div>
+            <div class="period-countdown" id="period-countdown"></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+            <div>
+              <label class="form-label">開始日期</label>
+              <input type="date" id="period-start" onchange="onPeriodChange()">
+            </div>
+            <div>
+              <label class="form-label">結束日期</label>
+              <input type="date" id="period-end" onchange="onPeriodChange()">
+            </div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" style="flex:1" onclick="setPeriod()">設定期間</button>
+            <button class="btn" onclick="clearPeriod()">清除</button>
+          </div>
+          <div id="export-area" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+            <div style="font-size:12px;color:var(--text2);margin-bottom:10px" id="export-hint"></div>
+            <button class="btn btn-success btn-full" onclick="exportReport()">📄 匯出績效報告 CSV</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Reset -->
       <div class="card">
         <div class="card-header"><span class="card-title" style="color:var(--red)">重置比賽</span></div>
@@ -571,16 +642,6 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
           <div class="metric-label">計分卡均分</div>
           <div class="metric-val neutral" id="hist-avg-sc">—</div>
           <div class="metric-sub">/ 25 滿分</div>
-        </div>
-      </div>
-
-      <!-- Performance attribution -->
-      <div class="card">
-        <div class="card-header"><span class="card-title">績效歸因</span></div>
-        <div class="card-body">
-          <div id="attr-section">
-            <div class="empty-state" style="padding:20px">成交後自動產出</div>
-          </div>
         </div>
       </div>
 
@@ -1045,6 +1106,9 @@ async function rejectOrder() {
 function executeOrder(order) {
   const g = state.groups[order.group];
   const cost = order.price * order.qty;
+  // Transaction tax: ETF 0.1%, Stock 0.3% (sell only, like Taiwan market)
+  const taxRate = state.securities[order.symbol]?.grp === 'etf' ? 0.001 : 0.003;
+  const tax = order.side === 'sell' ? Math.round(cost * taxRate) : 0;
   if (order.side === 'buy') {
     if (g.cash < cost) return;
     g.cash -= cost;
@@ -1054,10 +1118,13 @@ function executeOrder(order) {
   } else {
     const pos = g.positions.find(p => p.symbol === order.symbol);
     if (!pos || pos.qty < order.qty) return;
-    g.cash += cost;
+    g.cash += (cost - tax);  // deduct tax from proceeds
     pos.qty -= order.qty;
     if (pos.qty === 0) g.positions = g.positions.filter(p => p.symbol !== order.symbol);
+    if (tax > 0) toast(`交易稅 $${tax.toLocaleString()} (${(taxRate*100).toFixed(1)}%) 已從收入扣除`, 'warn');
   }
+  // Store tax on order for CSV export
+  order.tax = tax;
   g.tradeCount++;
   const nav = calcNAV(order.group);
   const prev = g.navHistory.length ? g.navHistory[g.navHistory.length-1].nav : INITIAL;
@@ -1124,19 +1191,13 @@ function updateAllMetrics() {
 
     // Freeze buttons
     const unEl = qs(`unfreeze-${prefix}`);
-    const fcEl = qs(`forceclose-${prefix === 'etf' ? 'etf' : 'stk'}`);
     if (unEl) unEl.style.display = g.frozen ? '' : 'none';
-    if (fcEl) fcEl.style.display = g.frozen ? 'none' : '';
 
     // Freeze banner on trade tab
     const fb = qs(`freeze-${grp}`);
     if (fb) fb.style.display = g.frozen ? 'flex' : 'none';
 
-    // Auto force close
-    if (dd > lim && !g.frozen && g.positions.length > 0) {
-      toast(`${g.name} 回撤超限！系統強制平倉`, 'danger');
-      forceClose(grp, true);
-    }
+
   }
 
   // Pending badge
@@ -1225,16 +1286,7 @@ function unfreezeGroup(grp) {
   updateAllMetrics();
 }
 
-function forceClose(grp, auto = false) {
-  const g = state.groups[grp];
-  for (const p of [...g.positions]) {
-    const s = state.securities[p.symbol];
-    if (s) g.cash += s.price * p.qty;
-  }
-  g.positions = []; g.frozen = true;
-  toast(`${g.name} 強制平倉完成，已凍結`, 'danger');
-  updateAllMetrics();
-}
+
 
 function settleNAV() {
   for (const grp of ['etf','stock']) {
@@ -1311,21 +1363,6 @@ function renderHistory() {
   setText('hist-trades', `${g.tradeCount} 筆成交`);
   setText('hist-avg-sc', avgSc);
 
-  // Attribution
-  const beta = Math.max(5, Math.min(70, 55 + ret));
-  const alpha = Math.max(5, 100 - beta - 20);
-  const noise = 100 - beta - alpha;
-  const hasData = g.tradeCount > 0;
-  qs('attr-section').innerHTML = hasData ? `
-    <div style="font-size:11px;color:var(--text2);margin-bottom:6px">Beta 市場 / Alpha 主動 / Noise 雜訊</div>
-    <div class="attr-bar">
-      <div class="attr-beta" style="width:${beta}%">β${beta}%</div>
-      <div class="attr-alpha" style="width:${alpha}%">α${alpha}%</div>
-      <div class="attr-noise" style="width:${noise}%">~</div>
-    </div>
-    <div style="font-size:11px;color:var(--text3);margin-top:6px">Alpha 比例越高，代表主動判斷力越強</div>
-  ` : '<div class="empty-state" style="padding:20px">成交後自動產出</div>';
-
   // Order list
   if (!orders.length) {
     qs('order-history-list').innerHTML = '<div class="empty-state">尚無訂單</div>';
@@ -1348,8 +1385,186 @@ function renderHistory() {
     </div>`).join('');
 }
 
+
+// ========== TRADING PERIOD ==========
+const period = { start: null, end: null };
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function onPeriodChange() {
+  const s = qs('period-start').value;
+  const e = qs('period-end').value;
+  if (s && e && e <= s) {
+    qs('period-end').value = '';
+    toast('結束日期必須晚於開始日期', 'warn');
+  }
+}
+
+function setPeriod() {
+  const s = qs('period-start').value;
+  const e = qs('period-end').value;
+  if (!s || !e) { toast('請同時選擇開始與結束日期', 'warn'); return; }
+  if (e <= s) { toast('結束日期必須晚於開始日期', 'warn'); return; }
+  period.start = new Date(s + 'T00:00:00');
+  period.end   = new Date(e + 'T23:59:59');
+  updatePeriodUI();
+  toast('交易期間已設定', 'success');
+}
+
+function clearPeriod() {
+  period.start = null; period.end = null;
+  qs('period-start').value = '';
+  qs('period-end').value = '';
+  updatePeriodUI();
+}
+
+function updatePeriodUI() {
+  const dot     = qs('period-dot');
+  const label   = qs('period-status-label');
+  const sub     = qs('period-status-sub');
+  const cdEl    = qs('period-countdown');
+  const expArea = qs('export-area');
+  const expHint = qs('export-hint');
+
+  if (!period.start || !period.end) {
+    dot.className = 'period-dot not-set';
+    label.textContent = '尚未設定交易期間';
+    sub.textContent = '請選擇開始與結束日期';
+    cdEl.textContent = '';
+    expArea.style.display = 'none';
+    return;
+  }
+
+  const now = new Date();
+  const fmtDate = d => d.toLocaleDateString('zh-TW', {month:'2-digit', day:'2-digit'});
+
+  if (now < period.start) {
+    dot.className = 'period-dot not-set';
+    label.textContent = '交易期間尚未開始';
+    sub.textContent = fmtDate(period.start) + ' → ' + fmtDate(period.end);
+    const daysLeft = Math.ceil((period.start - now) / 86400000);
+    cdEl.textContent = daysLeft + ' 天後開始';
+    cdEl.style.color = 'var(--text3)';
+    expArea.style.display = 'none';
+  } else if (now <= period.end) {
+    dot.className = 'period-dot active';
+    label.textContent = '交易期間進行中';
+    sub.textContent = fmtDate(period.start) + ' → ' + fmtDate(period.end);
+    const msLeft = period.end - now;
+    const dLeft  = Math.floor(msLeft / 86400000);
+    const hLeft  = Math.floor((msLeft % 86400000) / 3600000);
+    cdEl.textContent = dLeft > 0 ? ('剩 ' + dLeft + ' 天') : ('剩 ' + hLeft + ' 時');
+    cdEl.style.color = dLeft <= 1 ? 'var(--red)' : 'var(--teal)';
+    expArea.style.display = 'block';
+    expHint.textContent = '期間進行中，可隨時預覽匯出';
+  } else {
+    dot.className = 'period-dot ended';
+    label.textContent = '⏹ 交易期間已結束';
+    sub.textContent = fmtDate(period.start) + ' → ' + fmtDate(period.end);
+    cdEl.textContent = '已結束';
+    cdEl.style.color = 'var(--amber)';
+    expArea.style.display = 'block';
+    expHint.textContent = '交易期間已結束，請匯出完整紀錄';
+  }
+}
+
+setInterval(updatePeriodUI, 60000);
+
+// ========== EXPORT ==========
+function exportReport() {
+  const allOrders = state.orders.filter(o => o.status === 'executed');
+  const rows = [];
+
+  const periodLabel = period.start && period.end
+    ? (period.start.toLocaleDateString('zh-TW') + ' ～ ' + period.end.toLocaleDateString('zh-TW'))
+    : '未設定';
+
+  rows.push(['=== SimTrade 模擬交易績效報告 ===']);
+  rows.push(['交易期間', periodLabel]);
+  rows.push(['報告產出時間', new Date().toLocaleString('zh-TW')]);
+  rows.push([]);
+
+  // Section 1: Summary
+  rows.push(['=== 一、績效摘要 ===']);
+  rows.push(['組別','期末NAV','初始資金','累計損益','累計報酬率','最大回撤','成交筆數','計分卡均分']);
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups[grp];
+    const nav = calcNAV(grp);
+    const ret = nav - INITIAL;
+    const retPct = (ret / INITIAL * 100).toFixed(2) + '%';
+    const gOrders = allOrders.filter(o => o.group === grp);
+    const avgSc = gOrders.length
+      ? (gOrders.reduce((s, o) => s + (o.scorecard.total || 0), 0) / gOrders.length).toFixed(1)
+      : '—';
+    rows.push([g.name, Math.round(nav), INITIAL, Math.round(ret), retPct, g.maxDD.toFixed(2)+'%', g.tradeCount, avgSc]);
+  }
+  rows.push([]);
+
+  // Section 2: Trade detail
+  rows.push(['=== 二、交易明細（已成交） ===']);
+  rows.push(['下單時間','組別','商品代號','商品名稱','方向','數量(股)','成交參考價','成交金額','計分卡分數','計畫書摘要']);
+  const sorted = [...allOrders].sort((a,b) => a.time.localeCompare(b.time));
+  for (const o of sorted) {
+    const reasons = [1,2,3,4,5].map(i => 'Q'+i+':'+(o.scorecard.reasons && o.scorecard.reasons[i] ? o.scorecard.reasons[i] : '')).join(' | ');
+    rows.push([
+      o.time,
+      o.group === 'etf' ? 'ETF組' : '個股組',
+      o.symbol, o.name,
+      o.side === 'buy' ? '買入' : '賣出',
+      o.qty, o.price, Math.round(o.amount),
+      (o.tax || 0),
+      o.scorecard.total + '/25',
+      '"' + reasons.replace(/"/g, '""') + '"'
+    ]);
+  }
+  if (!sorted.length) rows.push(['（無成交紀錄）']);
+  rows.push([]);
+
+  // Section 3: Positions
+  rows.push(['=== 三、期末持倉（參考） ===']);
+  rows.push(['組別','商品代號','商品名稱','持有數量','成本均價','現值參考','未實現損益']);
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups[grp];
+    if (!g.positions.length) { rows.push([g.name, '（無持倉）']); continue; }
+    for (const p of g.positions) {
+      const s = state.securities[p.symbol];
+      const cur = s ? s.price : p.avgPrice;
+      const pnl = (cur - p.avgPrice) * p.qty;
+      rows.push([g.name, p.symbol, s ? s.name : '', p.qty, p.avgPrice.toFixed(2), (cur*p.qty).toFixed(0), pnl.toFixed(0)]);
+    }
+  }
+  rows.push([]);
+
+  // Section 4: Risk
+  rows.push(['=== 四、風控紀錄 ===']);
+  rows.push(['組別','最大回撤','回撤上限','是否超限','目前狀態']);
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups[grp];
+    const lim = grp === 'etf' ? state.limits.etf : state.limits.stk;
+    rows.push([g.name, g.maxDD.toFixed(2)+'%', lim+'%', g.maxDD > lim ? '是' : '否', g.frozen ? '凍結中' : '正常']);
+  }
+
+  const csv = '\uFEFF' + rows.map(r => Array.isArray(r) ? r.join(',') : r).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = 'SimTrade_報告_' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('CSV 已匯出', 'success');
+}
+
 // ========== INIT ==========
 async function init() {
+  // Set default dates: today → +7 days
+  const today = new Date().toISOString().slice(0,10);
+  const next7 = new Date(Date.now() + 7*86400000).toISOString().slice(0,10);
+  if (qs('period-start')) qs('period-start').value = today;
+  if (qs('period-end'))   qs('period-end').value   = next7;
+
   setupRealtime();
   await fetchInitialPrices();
   updateAllMetrics();
