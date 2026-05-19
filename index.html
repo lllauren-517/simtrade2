@@ -300,6 +300,7 @@ button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var
 .note-box{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-sm);padding:10px 12px;font-size:12px;color:var(--text2);margin-bottom:12px}
 .note-box strong{color:var(--amber)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 
 /* ── Chart modal ── */
@@ -754,8 +755,15 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
       <div class="tf-btn" id="tf-1M" onclick="setTf('1M')">1M</div>
       <div class="tf-btn" id="tf-3M" onclick="setTf('3M')">3M</div>
       <div class="tf-btn" id="tf-6M" onclick="setTf('6M')">6M</div>
+      <div class="tf-btn" id="tf-1Y" onclick="setTf('1Y')">1Y</div>
+      <div class="tf-btn" id="tf-3Y" onclick="setTf('3Y')">3Y</div>
     </div>
-    <div id="chart-container"></div>
+    <div id="chart-container" style="position:relative">
+      <div id="chart-loading" style="display:none;position:absolute;inset:0;background:rgba(18,21,28,.85);z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px">
+        <div style="width:28px;height:28px;border:2px solid var(--border2);border-top-color:var(--blue);border-radius:50%;animation:spin .7s linear infinite"></div>
+        <div style="font-size:12px;color:var(--text2)">載入中...</div>
+      </div>
+    </div>
     <div class="chart-modal-footer">
       <div class="btn-row">
         <button class="btn" onclick="closeChartModal()">關閉</button>
@@ -1508,8 +1516,20 @@ let lwChart = null;
 let chartSeries = null;
 let currentChartSym = null;
 let currentTf = '1W';
+const chartCache = {};   // key: sym+tf → [{time,open,high,low,close}]
+const ALL_TF = ['1W','1M','3M','6M','1Y','3Y'];
 
-// Seeded RNG for consistent simulated data per symbol
+// TF → Yahoo Finance range/interval params
+const TF_PARAMS = {
+  '1W': { range: '5d',  interval: '1d'  },
+  '1M': { range: '1mo', interval: '1d'  },
+  '3M': { range: '3mo', interval: '1d'  },
+  '6M': { range: '6mo', interval: '1d'  },
+  '1Y': { range: '1y',  interval: '1wk' },
+  '3Y': { range: '3y',  interval: '1wk' },
+};
+
+// Fallback seeded simulation (used when API fails)
 function seededRand(seed) {
   let s = seed;
   return function() {
@@ -1517,49 +1537,63 @@ function seededRand(seed) {
     return (s & 0x7fffffff) / 0x7fffffff;
   };
 }
-
 function strToSeed(str) {
   let h = 0;
   for (let i = 0; i < str.length; i++) h = Math.imul(31, h) + str.charCodeAt(i) | 0;
   return Math.abs(h) || 1;
 }
-
 function generateCandles(sym, tf) {
   const s = state.securities[sym];
   if (!s) return [];
-  const dayMap = { '1W': 7, '1M': 30, '3M': 90, '6M': 180 };
+  const dayMap = { '1W':7,'1M':30,'3M':90,'6M':180,'1Y':365,'3Y':1095 };
   const days = dayMap[tf] || 30;
   const rand = seededRand(strToSeed(sym + tf));
   const dailyVol = (s.vol || 0.2) / Math.sqrt(252);
-
-  // Walk backwards from current price to get starting price
   let price = s.price;
   for (let i = 0; i < days; i++) price /= (1 + (rand() - 0.5) * dailyVol * 2);
-
   const data = [];
-  const rand2 = seededRand(strToSeed(sym + tf)); // re-seed for forward walk
+  const rand2 = seededRand(strToSeed(sym + tf));
   for (let i = days; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    // Skip weekends
+    const d = new Date(); d.setDate(d.getDate() - i);
     if (d.getDay() === 0 || d.getDay() === 6) continue;
-    const dateStr = d.toISOString().slice(0, 10);
     const move = (rand2() - 0.48) * dailyVol * 2;
-    const open = price;
-    const close = price * (1 + move);
+    const open = price, close = price * (1 + move);
     const high = Math.max(open, close) * (1 + rand2() * dailyVol * 0.5);
     const low  = Math.min(open, close) * (1 - rand2() * dailyVol * 0.5);
-    data.push({ time: dateStr, open, high, low, close });
+    data.push({ time: d.toISOString().slice(0,10), open, high, low, close });
     price = close;
   }
-  // Force last candle to match current real price
-  if (data.length > 0) {
+  if (data.length) {
     const last = data[data.length - 1];
     last.close = s.price;
-    last.high = Math.max(last.high, s.price);
-    last.low  = Math.min(last.low,  s.price);
+    last.high  = Math.max(last.high, s.price);
+    last.low   = Math.min(last.low,  s.price);
   }
   return data;
+}
+
+// Fetch real OHLC from Yahoo Finance via Supabase Edge Function
+async function fetchRealCandles(sym, tf) {
+  const cacheKey = sym + '_' + tf;
+  if (chartCache[cacheKey]) return chartCache[cacheKey];
+
+  const { range, interval } = TF_PARAMS[tf] || TF_PARAMS['1M'];
+  try {
+    const { data, error } = await db.functions.invoke('history-function', {
+      body: { symbol: sym, range, interval }
+    });
+    if (error || !data?.candles?.length) throw new Error('no data');
+    chartCache[cacheKey] = data.candles;
+    return data.candles;
+  } catch(e) {
+    console.warn('history-function failed, using simulated data:', e.message);
+    return null; // will fall back to simulation
+  }
+}
+
+function showChartLoading(show) {
+  const el = qs('chart-loading');
+  if (el) el.style.display = show ? 'flex' : 'none';
 }
 
 function openChartModal(sym) {
@@ -1568,7 +1602,6 @@ function openChartModal(sym) {
   const s = state.securities[sym];
   if (!s) return;
 
-  // Header info
   qs('chart-sym-name').textContent = sym.replace('.TW','') + '  ' + s.name;
   qs('chart-sym-sub').textContent = s.grp === 'etf' ? 'ETF · 交易稅 0.1%' : '個股 · 交易稅 0.3%';
   const clr = (s.changeRate ?? 0) >= 0 ? 'var(--green)' : 'var(--red)';
@@ -1578,31 +1611,29 @@ function openChartModal(sym) {
   qs('chart-cur-chg').textContent = sign + ' ' + Math.abs(s.changeRate ?? 0).toFixed(2) + '%';
   qs('chart-cur-chg').style.color = clr;
 
-  // Timeframe buttons
-  ['1W','1M','3M','6M'].forEach(tf => {
+  ALL_TF.forEach(tf => {
     const el = qs('tf-' + tf);
     if (el) el.className = 'tf-btn' + (tf === currentTf ? ' active' : '');
   });
 
   qs('modal-chart').classList.add('open');
-  setTimeout(() => buildChart(sym, currentTf), 50); // wait for layout
+  setTimeout(() => buildChart(sym, currentTf), 60);
 }
 
-function buildChart(sym, tf) {
+async function buildChart(sym, tf) {
   const container = qs('chart-container');
   if (!container) return;
 
-  // Destroy previous chart
+  showChartLoading(true);
+
+  // Destroy previous chart instance
   if (lwChart) { lwChart.remove(); lwChart = null; chartSeries = null; }
 
-  const isDark = true;
+  // Create chart
   lwChart = LightweightCharts.createChart(container, {
-    width: container.clientWidth,
+    width:  container.clientWidth,
     height: container.clientHeight,
-    layout: {
-      background: { color: '#12151c' },
-      textColor: '#8892a4',
-    },
+    layout: { background: { color: '#12151c' }, textColor: '#8892a4' },
     grid: {
       vertLines: { color: 'rgba(255,255,255,0.04)' },
       horzLines: { color: 'rgba(255,255,255,0.04)' },
@@ -1613,22 +1644,27 @@ function buildChart(sym, tf) {
   });
 
   chartSeries = lwChart.addCandlestickSeries({
-    upColor:      '#34d399',
-    downColor:    '#f87171',
-    borderUpColor:   '#34d399',
-    borderDownColor: '#f87171',
-    wickUpColor:     '#34d399',
-    wickDownColor:   '#f87171',
+    upColor: '#34d399', downColor: '#f87171',
+    borderUpColor: '#34d399', borderDownColor: '#f87171',
+    wickUpColor: '#34d399', wickDownColor: '#f87171',
   });
 
-  const data = generateCandles(sym, tf);
+  // Try real data, fall back to simulation
+  let data = await fetchRealCandles(sym, tf);
+  if (!data || !data.length) {
+    data = generateCandles(sym, tf);
+    // Show a hint that it's simulated
+    toast('使用模擬歷史數據（Yahoo Finance 暫時無法取得）', 'warn');
+  }
+
   chartSeries.setData(data);
   lwChart.timeScale().fitContent();
+  showChartLoading(false);
 }
 
 function setTf(tf) {
   currentTf = tf;
-  ['1W','1M','3M','6M'].forEach(t => {
+  ALL_TF.forEach(t => {
     const el = qs('tf-' + t);
     if (el) el.className = 'tf-btn' + (t === tf ? ' active' : '');
   });
@@ -1643,18 +1679,15 @@ function closeChartModal() {
 function selectFromChart() {
   if (!currentChartSym) return;
   closeChartModal();
-  // Select this symbol in the order form
   const sym = currentChartSym;
   const s = state.securities[sym];
   if (!s) return;
-  // Switch group if needed
   if (s.grp !== state.group) setGroup(s.grp);
   setTimeout(() => {
     const sel = qs('order-symbol');
     if (sel && [...sel.options].some(o => o.value === sym)) {
       sel.value = sym; updateOrderPrice();
     }
-    // Scroll to order form
     qs('order-symbol').scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, 100);
 }
