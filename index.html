@@ -1,0 +1,1363 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>SimTrade — 模擬投資沙盒</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root {
+  --bg:     #0a0c10;
+  --bg2:    #12151c;
+  --bg3:    #1a1f2b;
+  --bg4:    #222839;
+  --border: rgba(255,255,255,0.08);
+  --border2:rgba(255,255,255,0.14);
+  --text:   #e2e8f0;
+  --text2:  #8892a4;
+  --text3:  #4a5568;
+  --teal:   #2dd4bf;
+  --teal-bg:rgba(45,212,191,0.08);
+  --teal-bd:rgba(45,212,191,0.25);
+  --amber:  #fbbf24;
+  --amber-bg:rgba(251,191,36,0.08);
+  --amber-bd:rgba(251,191,36,0.25);
+  --red:    #f87171;
+  --red-bg: rgba(248,113,113,0.08);
+  --red-bd: rgba(248,113,113,0.25);
+  --green:  #34d399;
+  --green-bg:rgba(52,211,153,0.08);
+  --blue:   #60a5fa;
+  --blue-bg:rgba(96,165,250,0.08);
+  --mono: 'IBM Plex Mono', monospace;
+  --sans: 'Noto Sans TC', sans-serif;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5}
+
+/* ── Layout ── */
+#app{display:flex;flex-direction:column;height:100vh;height:100dvh}
+
+/* ── Header ── */
+#header{
+  background:var(--bg2);
+  border-bottom:1px solid var(--border);
+  padding:0 16px;
+  height:52px;
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;
+  position:relative;z-index:50;
+}
+#header h1{font-family:var(--mono);font-size:15px;font-weight:600;letter-spacing:.5px}
+#header h1 span{color:var(--teal)}
+.hdr-right{display:flex;align-items:center;gap:10px}
+#price-pill{
+  display:flex;align-items:center;gap:5px;
+  background:var(--bg3);border:1px solid var(--border2);
+  border-radius:20px;padding:4px 10px;
+  font-family:var(--mono);font-size:11px;color:var(--text3);
+}
+#price-dot{width:6px;height:6px;border-radius:50%;background:var(--text3);flex-shrink:0}
+#price-dot.live{background:var(--green);animation:pulse 2s infinite}
+#price-dot.err{background:var(--red)}
+
+/* ── Tab Bar ── */
+#tabbar{
+  background:var(--bg2);
+  border-bottom:1px solid var(--border);
+  display:flex;
+  flex-shrink:0;
+}
+.tb{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:10px 4px 8px;gap:4px;
+  font-size:11px;color:var(--text3);cursor:pointer;
+  border-bottom:2px solid transparent;
+  transition:all .15s;
+}
+.tb .tb-icon{font-size:18px}
+.tb.active{color:var(--text);border-bottom-color:var(--blue)}
+.tb.active.t-trade{border-bottom-color:var(--teal)}
+.tb.active.t-risk{border-bottom-color:var(--amber)}
+.tb.active.t-history{border-bottom-color:var(--blue)}
+
+/* ── Content ── */
+#content{flex:1;overflow-y:auto;overscroll-behavior:contain}
+.panel{display:none;padding:16px;padding-bottom:24px}
+.panel.active{display:block}
+
+/* ── Cards ── */
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:12px}
+.card-header{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.card-title{font-size:11px;font-weight:700;letter-spacing:.8px;color:var(--text2);text-transform:uppercase}
+.card-body{padding:14px}
+
+/* ── Metrics ── */
+.metric-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.metric{background:var(--bg3);border-radius:var(--radius-sm);padding:12px}
+.metric-label{font-size:11px;color:var(--text3);margin-bottom:2px}
+.metric-val{font-family:var(--mono);font-size:20px;font-weight:600}
+.metric-val.up{color:var(--green)}
+.metric-val.down{color:var(--red)}
+.metric-val.warn{color:var(--amber)}
+.metric-val.neutral{color:var(--text)}
+.metric-sub{font-size:11px;color:var(--text3);margin-top:2px}
+
+/* ── Ticker list ── */
+.ticker-section-label{
+  font-size:10px;font-weight:700;letter-spacing:1px;
+  padding:8px 14px 6px;
+  color:var(--text3);text-transform:uppercase;
+  border-bottom:1px solid var(--border);
+}
+.ticker-section-label.etf-lbl{color:var(--teal)}
+.ticker-section-label.stk-lbl{color:var(--amber)}
+.ticker-row{
+  display:flex;align-items:center;gap:10px;
+  padding:11px 14px;border-bottom:1px solid var(--border);
+  cursor:pointer;transition:background .1s;
+}
+.ticker-row:last-child{border-bottom:none}
+.ticker-row:active{background:var(--bg3)}
+.ticker-left{flex:1;min-width:0}
+.ticker-sym{font-family:var(--mono);font-size:13px;font-weight:600}
+.ticker-name{font-size:11px;color:var(--text2);margin-top:1px}
+.ticker-right{text-align:right}
+.ticker-price{font-family:var(--mono);font-size:15px;font-weight:600}
+.ticker-chg{font-family:var(--mono);font-size:11px;margin-top:1px}
+@keyframes flashUp{0%{background:rgba(52,211,153,.25)}100%{background:transparent}}
+@keyframes flashDown{0%{background:rgba(248,113,113,.25)}100%{background:transparent}}
+.flash-up{animation:flashUp .6s ease}
+.flash-down{animation:flashDown .6s ease}
+
+/* ── Forms ── */
+.form-row{margin-bottom:12px}
+.form-label{font-size:11px;font-weight:600;color:var(--text2);display:block;margin-bottom:6px;letter-spacing:.3px}
+.form-hint{font-size:11px;color:var(--text3);margin-top:4px}
+input,select{
+  width:100%;background:var(--bg3);border:1px solid var(--border2);
+  color:var(--text);border-radius:var(--radius-sm);
+  padding:10px 12px;font-family:var(--sans);font-size:14px;
+  -webkit-appearance:none;appearance:none;outline:none;
+}
+input:focus,select:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,165,250,.12)}
+select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238892a4' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px}
+select option{background:var(--bg3)}
+input[readonly]{background:var(--bg4);color:var(--text2);cursor:default}
+
+/* ── Buttons ── */
+button{cursor:pointer;border:none;border-radius:var(--radius-sm);font-family:var(--sans);font-size:14px;font-weight:500;padding:10px 16px;transition:all .15s;-webkit-appearance:none}
+.btn{background:var(--bg3);border:1px solid var(--border2);color:var(--text)}
+.btn:active{opacity:.75}
+.btn-primary{background:var(--blue);color:#0a0c10}
+.btn-primary:active{opacity:.8}
+.btn-success{background:var(--green);color:#0a0c10}
+.btn-danger{background:var(--red);color:#0a0c10}
+.btn-warn{background:var(--amber);color:#0a0c10}
+.btn-full{width:100%;padding:13px}
+.btn-sm{padding:7px 12px;font-size:12px}
+.btn-row{display:flex;gap:8px}
+.btn-row button{flex:1}
+
+/* ── Direction toggle ── */
+.dir-toggle{display:flex;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-sm);overflow:hidden;margin-bottom:12px}
+.dir-btn{flex:1;padding:10px;text-align:center;font-size:14px;font-weight:600;cursor:pointer;transition:all .15s;color:var(--text3)}
+.dir-btn.active-buy{background:var(--green-bg);color:var(--green);border:1px solid rgba(52,211,153,.3)}
+.dir-btn.active-sell{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,113,113,.3)}
+
+/* ── Badges ── */
+.badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:700;font-family:var(--mono)}
+.badge-etf{background:var(--teal-bg);color:var(--teal);border:1px solid var(--teal-bd)}
+.badge-stock{background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber-bd)}
+.badge-pending{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(96,165,250,.25)}
+.badge-executed{background:var(--green-bg);color:var(--green);border:1px solid rgba(52,211,153,.25)}
+.badge-rejected{background:var(--red-bg);color:var(--red);border:1px solid var(--red-bd)}
+.badge-buy{background:var(--green-bg);color:var(--green);border:1px solid rgba(52,211,153,.25)}
+.badge-sell{background:var(--red-bg);color:var(--red);border:1px solid var(--red-bd)}
+
+/* ── Order list ── */
+.order-item{padding:12px 14px;border-bottom:1px solid var(--border)}
+.order-item:last-child{border-bottom:none}
+.order-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.order-sym{font-family:var(--mono);font-size:14px;font-weight:600}
+.order-meta{font-size:11px;color:var(--text3);margin-top:2px}
+.order-amount{font-family:var(--mono);font-size:13px;font-weight:600;text-align:right}
+
+/* ── Position item ── */
+.pos-item{padding:12px 14px;border-bottom:1px solid var(--border)}
+.pos-item:last-child{border-bottom:none}
+.pos-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}
+.pos-sym{font-family:var(--mono);font-size:14px;font-weight:600}
+.pos-pnl{font-family:var(--mono);font-size:14px;font-weight:600;text-align:right}
+.pos-detail{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.pos-detail-item{font-size:11px;color:var(--text3)}
+.pos-detail-item span{color:var(--text2);font-family:var(--mono)}
+
+/* ── Risk bar ── */
+.risk-wrap{margin:10px 0}
+.risk-label-row{display:flex;justify-content:space-between;margin-bottom:5px;font-size:11px}
+.risk-bar-bg{background:var(--bg4);border-radius:4px;height:8px;overflow:hidden}
+.risk-bar-fill{height:100%;border-radius:4px;transition:width .4s}
+.risk-bar-fill.ok{background:var(--green)}
+.risk-bar-fill.warn{background:var(--amber)}
+.risk-bar-fill.danger{background:var(--red)}
+
+/* ── Freeze banner ── */
+.freeze-banner{
+  background:var(--red-bg);border:1px solid var(--red-bd);
+  border-radius:var(--radius-sm);padding:12px 14px;
+  display:flex;align-items:center;gap:10px;margin-bottom:12px;
+}
+.freeze-icon{font-size:20px;flex-shrink:0}
+.freeze-text strong{color:var(--red);font-size:13px;display:block}
+.freeze-text span{font-size:12px;color:var(--text2)}
+
+/* ── Scorecard modal ── */
+.modal-bg{
+  display:none;position:fixed;inset:0;
+  background:rgba(0,0,0,.75);z-index:200;
+  align-items:flex-end;justify-content:center;
+  padding:0;
+}
+.modal-bg.open{display:flex}
+.modal{
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:var(--radius) var(--radius) 0 0;
+  width:100%;max-height:92vh;
+  display:flex;flex-direction:column;
+  animation:slideUp .25s ease;
+}
+@keyframes slideUp{from{transform:translateY(40px);opacity:0}to{transform:translateY(0);opacity:1}}
+.modal-handle{width:36px;height:4px;background:var(--bg4);border-radius:2px;margin:10px auto 0}
+.modal-header{padding:14px 16px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.modal-title{font-size:15px;font-weight:600}
+.modal-close{background:var(--bg3);border:1px solid var(--border2);color:var(--text2);width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;padding:0;cursor:pointer}
+.modal-body{padding:16px;overflow-y:auto;flex:1}
+.modal-footer{padding:12px 16px;border-top:1px solid var(--border);background:var(--bg2)}
+
+/* ── Scorecard questions ── */
+.sc-order-summary{background:var(--bg3);border-radius:var(--radius-sm);padding:12px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:10px}
+.sc-sum-item .sc-sum-label{font-size:10px;color:var(--text3)}
+.sc-sum-item .sc-sum-val{font-family:var(--mono);font-size:13px;font-weight:600}
+.sc-question{margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.sc-question:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+.sc-q-header{display:flex;gap:8px;margin-bottom:8px}
+.sc-q-num{width:22px;height:22px;border-radius:50%;background:var(--bg4);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;color:var(--text3);flex-shrink:0}
+.sc-q-text{font-size:13px;color:var(--text);line-height:1.45;padding-top:2px}
+.sc-input{margin-bottom:8px}
+.sc-scores{display:flex;gap:6px}
+.sc-dot{
+  flex:1;height:32px;border:1px solid var(--border2);border-radius:6px;
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:13px;color:var(--text3);cursor:pointer;
+  transition:all .15s;
+}
+.sc-dot.s1{background:rgba(248,113,113,.2);color:var(--red);border-color:var(--red-bd)}
+.sc-dot.s2{background:rgba(251,191,36,.15);color:var(--amber);border-color:var(--amber-bd)}
+.sc-dot.s3{background:var(--blue-bg);color:var(--blue);border-color:rgba(96,165,250,.3)}
+.sc-dot.s4{background:var(--green-bg);color:var(--green);border-color:rgba(52,211,153,.3)}
+.sc-dot.s5{background:var(--teal-bg);color:var(--teal);border-color:var(--teal-bd)}
+.sc-total-row{
+  background:var(--bg3);border-radius:var(--radius-sm);padding:12px;
+  display:flex;align-items:center;justify-content:space-between;margin-top:14px;
+}
+.sc-total-label{font-size:12px;color:var(--text2)}
+.sc-total-val{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--blue)}
+
+/* ── Review modal items ── */
+.review-sc-row{display:flex;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px}
+.review-sc-row:last-child{border-bottom:none}
+.review-sc-q{flex:1;color:var(--text2)}
+.review-sc-reason{color:var(--text3);font-size:11px;margin-top:2px}
+
+/* ── Chart ── */
+.chart-wrap{position:relative;width:100%;height:200px;margin-top:4px}
+
+/* ── Toast ── */
+.toast-area{position:fixed;top:60px;left:50%;transform:translateX(-50%);width:calc(100% - 32px);max-width:400px;display:flex;flex-direction:column;gap:8px;z-index:300;pointer-events:none}
+.toast{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-sm);padding:11px 14px;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,.5);animation:slideDown .2s ease;pointer-events:auto}
+.toast.success{border-left:3px solid var(--green)}
+.toast.danger{border-left:3px solid var(--red)}
+.toast.warn{border-left:3px solid var(--amber)}
+.toast.info{border-left:3px solid var(--blue)}
+@keyframes slideDown{from{transform:translateY(-10px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+/* ── Misc ── */
+.empty-state{padding:40px 20px;text-align:center;color:var(--text3);font-size:13px}
+.divider{border:none;border-top:1px solid var(--border);margin:12px 0}
+.section-title{font-size:11px;font-weight:700;letter-spacing:.8px;color:var(--text3);text-transform:uppercase;margin-bottom:10px}
+.group-toggle{display:flex;gap:8px;margin-bottom:14px}
+.group-btn{flex:1;padding:9px;text-align:center;font-size:12px;font-weight:700;border-radius:var(--radius-sm);cursor:pointer;transition:all .15s;border:1px solid var(--border2);color:var(--text3);background:var(--bg3)}
+.group-btn.etf-active{background:var(--teal-bg);color:var(--teal);border-color:var(--teal-bd)}
+.group-btn.stk-active{background:var(--amber-bg);color:var(--amber);border-color:var(--amber-bd)}
+.tag{font-size:10px;color:var(--text3);font-family:var(--mono)}
+.note-box{background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-sm);padding:10px 12px;font-size:12px;color:var(--text2);margin-bottom:12px}
+.note-box strong{color:var(--amber)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ── Report ── */
+.attr-bar{display:flex;height:22px;border-radius:6px;overflow:hidden;margin:8px 0}
+.attr-beta{background:var(--blue);display:flex;align-items:center;justify-content:center;font-size:10px;color:#0a0c10;font-weight:700}
+.attr-alpha{background:var(--green);display:flex;align-items:center;justify-content:center;font-size:10px;color:#0a0c10;font-weight:700}
+.attr-noise{background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text3);font-weight:700}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- HEADER -->
+  <header id="header">
+    <h1><span>Sim</span>Trade</h1>
+    <div class="hdr-right">
+      <div id="price-pill">
+        <div id="price-dot"></div>
+        <span id="price-txt">參考報價</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- TAB BAR -->
+  <nav id="tabbar">
+    <div class="tb t-trade active" onclick="switchTab('trade')">
+      <span class="tb-icon">📊</span>交易
+    </div>
+    <div class="tb t-risk" onclick="switchTab('risk')">
+      <span class="tb-icon">🛡️</span>風控
+    </div>
+    <div class="tb t-history" onclick="switchTab('history')">
+      <span class="tb-icon">📋</span>記錄
+    </div>
+  </nav>
+
+  <!-- CONTENT -->
+  <div id="content">
+
+    <!-- ====== TRADE PANEL ====== -->
+    <div id="panel-trade" class="panel active">
+
+      <!-- Freeze banners -->
+      <div id="freeze-etf" class="freeze-banner" style="display:none">
+        <span class="freeze-icon">🔒</span>
+        <div class="freeze-text"><strong>ETF 組已凍結</strong><span>請前往風控頁面解除</span></div>
+      </div>
+      <div id="freeze-stock" class="freeze-banner" style="display:none">
+        <span class="freeze-icon">🔒</span>
+        <div class="freeze-text"><strong>個股組已凍結</strong><span>請前往風控頁面解除</span></div>
+      </div>
+
+      <!-- Note -->
+      <div class="note-box">⚠ <strong>注意：</strong>報價來自 Yahoo Finance，可能存在延遲，僅供學習模擬用途，非即時成交價格。</div>
+
+      <!-- Group selector -->
+      <div class="group-toggle">
+        <div class="group-btn etf-active" id="grp-etf" onclick="setGroup('etf')">ETF 組</div>
+        <div class="group-btn" id="grp-stk" onclick="setGroup('stock')">個股組</div>
+      </div>
+
+      <!-- Quotes -->
+      <div class="card" id="quote-card">
+        <div class="card-header">
+          <span class="card-title">商品報價</span>
+          <span class="tag" id="quote-update-time">—</span>
+        </div>
+        <div id="ticker-list">
+          <div class="empty-state">載入中...</div>
+        </div>
+      </div>
+
+      <!-- NAV mini -->
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-label" id="nav-label">ETF 組 NAV</div>
+          <div class="metric-val neutral" id="mini-nav">—</div>
+          <div class="metric-sub" id="mini-ret">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">現金剩餘</div>
+          <div class="metric-val neutral" id="mini-cash">—</div>
+          <div class="metric-sub">可用資金</div>
+        </div>
+      </div>
+
+      <!-- Positions -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">目前持倉</span>
+          <span class="tag" id="pos-count">0 筆</span>
+        </div>
+        <div id="positions-list">
+          <div class="empty-state">尚無持倉</div>
+        </div>
+      </div>
+
+      <!-- Order entry -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">下單</span></div>
+        <div class="card-body">
+          <!-- Direction toggle -->
+          <div class="dir-toggle">
+            <div class="dir-btn active-buy" id="dir-buy" onclick="setDir('buy')">▲ 買入</div>
+            <div class="dir-btn" id="dir-sell" onclick="setDir('sell')">▼ 賣出</div>
+          </div>
+
+          <div class="form-row">
+            <label class="form-label">選擇商品</label>
+            <select id="order-symbol" onchange="onSymbolChange()">
+              <option value="">— 請選擇 —</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <label class="form-label">數量（股 / 單位）</label>
+            <input type="number" id="order-qty" value="100" min="1" inputmode="numeric" oninput="onQtyChange()">
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+            <div>
+              <div class="form-label">參考報價</div>
+              <input type="text" id="order-price" readonly>
+            </div>
+            <div>
+              <div class="form-label">預估金額</div>
+              <input type="text" id="order-amount" readonly style="color:var(--teal);font-family:var(--mono)">
+            </div>
+          </div>
+
+          <button class="btn btn-primary btn-full" onclick="openScorecard()">填寫交易計畫書並送審 →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====== RISK PANEL ====== -->
+    <div id="panel-risk" class="panel">
+
+      <!-- ETF Group -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title" style="color:var(--teal)">ETF 組</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-sm btn-success" id="unfreeze-etf" style="display:none" onclick="unfreezeGroup('etf')">解凍</button>
+            <button class="btn btn-sm btn-danger" id="forceclose-etf" onclick="forceClose('etf')">強制平倉</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="risk-wrap">
+            <div class="risk-label-row">
+              <span style="color:var(--text2)">回撤使用率</span>
+              <span style="font-family:var(--mono);font-size:12px" id="etf-dd-label">0% / 10%</span>
+            </div>
+            <div class="risk-bar-bg"><div class="risk-bar-fill ok" id="etf-dd-bar" style="width:0%"></div></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:4px">
+            <div class="metric" style="padding:10px">
+              <div class="metric-label">最大回撤</div>
+              <div class="metric-val neutral" style="font-size:16px" id="etf-dd-val">0.00%</div>
+            </div>
+            <div class="metric" style="padding:10px">
+              <div class="metric-label">資金使用</div>
+              <div class="metric-val neutral" style="font-size:16px" id="etf-util">0%</div>
+            </div>
+            <div class="metric" style="padding:10px">
+              <div class="metric-label">夏普值</div>
+              <div class="metric-val neutral" style="font-size:16px" id="etf-sharpe">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stock Group -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title" style="color:var(--amber)">個股組</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-sm btn-success" id="unfreeze-stk" style="display:none" onclick="unfreezeGroup('stock')">解凍</button>
+            <button class="btn btn-sm btn-danger" id="forceclose-stk" onclick="forceClose('stock')">強制平倉</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="risk-wrap">
+            <div class="risk-label-row">
+              <span style="color:var(--text2)">回撤使用率</span>
+              <span style="font-family:var(--mono);font-size:12px" id="stk-dd-label">0% / 10%</span>
+            </div>
+            <div class="risk-bar-bg"><div class="risk-bar-fill ok" id="stk-dd-bar" style="width:0%"></div></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:4px">
+            <div class="metric" style="padding:10px">
+              <div class="metric-label">最大回撤</div>
+              <div class="metric-val neutral" style="font-size:16px" id="stk-dd-val">0.00%</div>
+            </div>
+            <div class="metric" style="padding:10px">
+              <div class="metric-label">資金使用</div>
+              <div class="metric-val neutral" style="font-size:16px" id="stk-util">0%</div>
+            </div>
+            <div class="metric" style="padding:10px">
+              <div class="metric-label">夏普值</div>
+              <div class="metric-val neutral" style="font-size:16px" id="stk-sharpe">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pending approval -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">待審訂單</span>
+          <span class="badge badge-pending" id="pending-badge">0 筆</span>
+        </div>
+        <div id="pending-list">
+          <div class="empty-state">目前無待審訂單</div>
+        </div>
+      </div>
+
+      <!-- Risk limits -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">風控上限設定</span></div>
+        <div class="card-body">
+          <div class="form-row">
+            <label class="form-label">ETF 組最大回撤上限 (%)</label>
+            <input type="number" id="etf-dd-limit" value="10" min="1" max="30" onchange="updateLimits()">
+          </div>
+          <div class="form-row" style="margin-bottom:0">
+            <label class="form-label">個股組最大回撤上限 (%)</label>
+            <input type="number" id="stk-dd-limit" value="10" min="1" max="30" onchange="updateLimits()">
+          </div>
+        </div>
+      </div>
+
+      <!-- NAV chart -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">NAV 走勢</span>
+          <button class="btn btn-sm btn-success" onclick="settleNAV()">結算紀錄</button>
+        </div>
+        <div class="card-body" style="padding:8px 14px 14px">
+          <div class="chart-wrap"><canvas id="nav-chart"></canvas></div>
+        </div>
+      </div>
+
+      <!-- Reset -->
+      <div class="card">
+        <div class="card-header"><span class="card-title" style="color:var(--red)">重置比賽</span></div>
+        <div class="card-body">
+          <p style="font-size:12px;color:var(--text2);margin-bottom:12px">將所有持倉、訂單與資金歸零，重新開始一場新的模擬賽。</p>
+          <button class="btn btn-danger btn-full" onclick="resetAll()">⚠ 全部重置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====== HISTORY PANEL ====== -->
+    <div id="panel-history" class="panel">
+
+      <!-- Group filter -->
+      <div class="group-toggle">
+        <div class="group-btn etf-active" id="hist-etf" onclick="setHistGroup('etf')">ETF 組</div>
+        <div class="group-btn" id="hist-stk" onclick="setHistGroup('stock')">個股組</div>
+      </div>
+
+      <!-- Stats row -->
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-label">累計報酬</div>
+          <div class="metric-val neutral" id="hist-ret">—</div>
+          <div class="metric-sub" id="hist-trades">0 筆成交</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">計分卡均分</div>
+          <div class="metric-val neutral" id="hist-avg-sc">—</div>
+          <div class="metric-sub">/ 25 滿分</div>
+        </div>
+      </div>
+
+      <!-- Performance attribution -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">績效歸因</span></div>
+        <div class="card-body">
+          <div id="attr-section">
+            <div class="empty-state" style="padding:20px">成交後自動產出</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Order history -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">訂單記錄</span>
+        </div>
+        <div id="order-history-list">
+          <div class="empty-state">尚無訂單</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== SCORECARD MODAL ====== -->
+<div class="modal-bg" id="modal-scorecard">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <span class="modal-title">交易計畫書</span>
+      <button class="modal-close" onclick="closeScorecard()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="sc-order-summary" id="sc-summary"></div>
+
+      <div class="sc-question">
+        <div class="sc-q-header">
+          <div class="sc-q-num">1</div>
+          <div class="sc-q-text">技術面訊號：均線、量價、型態支持此方向嗎？</div>
+        </div>
+        <div class="sc-input"><input type="text" id="sc1" placeholder="簡述技術面觀察..."></div>
+        <div class="sc-scores" id="scores-1"></div>
+      </div>
+
+      <div class="sc-question">
+        <div class="sc-q-header">
+          <div class="sc-q-num">2</div>
+          <div class="sc-q-text">基本面依據：財報、產業趨勢或總體經濟支持此操作嗎？</div>
+        </div>
+        <div class="sc-input"><input type="text" id="sc2" placeholder="簡述基本面觀察..."></div>
+        <div class="sc-scores" id="scores-2"></div>
+      </div>
+
+      <div class="sc-question">
+        <div class="sc-q-header">
+          <div class="sc-q-num">3</div>
+          <div class="sc-q-text">停損設定：預設何種條件觸發出場？</div>
+        </div>
+        <div class="sc-input"><input type="text" id="sc3" placeholder="例：跌破 -5% 時停損..."></div>
+        <div class="sc-scores" id="scores-3"></div>
+      </div>
+
+      <div class="sc-question">
+        <div class="sc-q-header">
+          <div class="sc-q-num">4</div>
+          <div class="sc-q-text">倉位合理性：此筆佔組合比例是否在風控上限內？</div>
+        </div>
+        <div class="sc-input"><input type="text" id="sc4" placeholder="例：佔總資產 15%，未超 30% 上限..."></div>
+        <div class="sc-scores" id="scores-4"></div>
+      </div>
+
+      <div class="sc-question">
+        <div class="sc-q-header">
+          <div class="sc-q-num">5</div>
+          <div class="sc-q-text">目標報酬：預計持倉多久？目標獲利幅度？</div>
+        </div>
+        <div class="sc-input"><input type="text" id="sc5" placeholder="例：持倉 2 週，目標 +8%..."></div>
+        <div class="sc-scores" id="scores-5"></div>
+      </div>
+
+      <div class="sc-total-row">
+        <div>
+          <div class="sc-total-label">計分卡總分</div>
+          <div id="sc-level-badge" class="badge badge-pending" style="margin-top:4px">尚未評分</div>
+        </div>
+        <div style="text-align:right">
+          <span class="sc-total-val" id="sc-total">0</span>
+          <span style="color:var(--text3);font-family:var(--mono);font-size:14px"> / 25</span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div class="btn-row">
+        <button class="btn" onclick="closeScorecard()">取消</button>
+        <button class="btn btn-primary" style="flex:2" onclick="submitOrder()">送交風控審核 →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====== REVIEW MODAL ====== -->
+<div class="modal-bg" id="modal-review">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <span class="modal-title">審核訂單</span>
+      <button class="modal-close" onclick="closeReview()">✕</button>
+    </div>
+    <div class="modal-body" id="review-content"></div>
+    <div class="modal-footer">
+      <div class="form-row" style="margin-bottom:10px">
+        <input type="text" id="review-comment" placeholder="風控意見（可選填）">
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-danger" onclick="rejectOrder()">駁回</button>
+        <button class="btn btn-success" style="flex:2" onclick="approveOrder()">核准並執行</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-area" id="toasts"></div>
+
+<script>
+// ========== SUPABASE ==========
+const supabaseUrl = 'https://gfreljxlgfrqsltswphj.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmcmVsanhsZ2ZycXNsdHN3cGhqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg5OTcwMjgsImV4cCI6MjA5NDU3MzAyOH0.IHSE6EuyNNeKVtbCTnB4Dtow_7eLS21elUVH4V0eug0';
+const db = supabase.createClient(supabaseUrl, supabaseKey);
+
+// ========== STATE ==========
+const INITIAL = 200_000_000;
+const state = {
+  group: 'etf',           // current active group for trade tab
+  histGroup: 'etf',       // current active group for history tab
+  currentDir: 'buy',
+  securities: {},
+  orders: [],
+  pendingApproval: [],
+  scores: {},
+  reviewId: null,
+  limits: { etf: 10, stk: 10 },
+  groups: {
+    etf:   mkGroup('ETF 組'),
+    stock: mkGroup('個股組'),
+  }
+};
+
+function mkGroup(name) {
+  return { name, cash: INITIAL, positions: [], navHistory: [{t: Date.now(), nav: INITIAL}], frozen: false, peakNAV: INITIAL, maxDD: 0, tradeCount: 0, returns: [] };
+}
+
+// ========== UTILS ==========
+const mono = n => n == null ? '—' : n.toLocaleString('zh-TW', {minimumFractionDigits:0, maximumFractionDigits:0});
+const money = n => n == null ? '—' : '$' + mono(Math.round(n));
+const pct = n => n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+const nowTime = () => new Date().toTimeString().slice(0,8);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,5);
+const qs = id => document.getElementById(id);
+const setText = (id, val, color) => { const el = qs(id); if(el){ el.textContent = val; if(color) el.style.color = color; } };
+
+function toast(msg, type='info') {
+  const area = qs('toasts');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`; t.textContent = msg;
+  area.appendChild(t);
+  setTimeout(() => t.style.opacity = '0', 3200);
+  setTimeout(() => t.remove(), 3700);
+}
+
+// ========== NAVIGATION ==========
+function switchTab(tab) {
+  ['trade','risk','history'].forEach(t => {
+    qs(`panel-${t}`).classList.toggle('active', t === tab);
+    document.querySelector(`.tb.t-${t}`).classList.toggle('active', t === tab);
+  });
+  if (tab === 'risk') setTimeout(renderNavChart, 100);
+  if (tab === 'history') renderHistory();
+}
+
+// ========== PRICE ==========
+async function fetchInitialPrices() {
+  const { data, error } = await db.from('securities').select('*');
+  if (error || !data) return;
+  data.forEach(item => {
+    state.securities[item.symbol] = {
+      name: item.name, price: +item.price, base: +item.base,
+      vol: +item.vol, type: item.type, grp: item.grp,
+    };
+  });
+  renderTickers(); updateOrderSymbols(); updateOrderPrice();
+}
+
+async function triggerPriceUpdate() {
+  const dot = qs('price-dot');
+  if(dot) dot.className = '';
+  try {
+    const { data, error } = await db.functions.invoke('bright-function');
+    if (error) throw error;
+    if(dot) dot.className = 'live';
+    setText('price-txt', `參考報價 · ${nowTime()}`);
+  } catch(e) {
+    if(dot) dot.className = 'err';
+    setText('price-txt', '報價暫時無法取得');
+  }
+}
+
+function setupRealtime() {
+  db.channel('sec-changes')
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'securities' }, payload => {
+      const item = payload.new;
+      const s = state.securities[item.symbol];
+      if (!s) return;
+      const old = s.price;
+      s.price = +item.price;
+      s.change = s.price - s.base;
+      s.changeRate = s.base > 0 ? (s.change / s.base) * 100 : 0;
+      if(Math.abs(s.price - old) > 0.001) flashRow(item.symbol, s.price > old ? 'up' : 'down');
+      renderTickers(); updateOrderPrice(); updateAllMetrics();
+      setText('quote-update-time', nowTime());
+    }).subscribe();
+
+  db.channel('order-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, payload => {
+      const o = payload.new;
+      if (payload.eventType === 'INSERT') {
+        const order = {
+          id: o.id, time: o.time, symbol: o.symbol, name: o.name,
+          qty: +o.qty, side: o.side, price: +o.price, amount: +o.amount,
+          group: o.grp, status: o.status, comment: o.comment,
+          scorecard: o.scorecard
+        };
+        state.orders.push(order);
+        if (order.status === 'pending') {
+          state.pendingApproval.push(order);
+          toast(`新訂單進件：${order.symbol}`, 'info');
+        }
+      } else if (payload.eventType === 'UPDATE') {
+        const local = state.orders.find(x => x.id === o.id);
+        if (local && local.status === 'pending') {
+          local.status = o.status; local.comment = o.comment;
+          state.pendingApproval = state.pendingApproval.filter(x => x.id !== o.id);
+          if (o.status === 'executed') { executeOrder(local); toast(`訂單核准成交：${local.symbol}`, 'success'); }
+          else if (o.status === 'rejected') toast(`訂單遭駁回：${local.symbol}`, 'warn');
+        }
+      }
+      updateAllMetrics();
+    }).subscribe();
+}
+
+function flashRow(symbol, dir) {
+  document.querySelectorAll('.ticker-row').forEach(row => {
+    if(row.dataset.symbol === symbol) {
+      row.classList.remove('flash-up','flash-down');
+      void row.offsetWidth;
+      row.classList.add(dir === 'up' ? 'flash-up' : 'flash-down');
+    }
+  });
+}
+
+// ========== RENDER TICKERS ==========
+function renderTickers() {
+  const grp = state.group;
+  let html = '';
+  for (const sym in state.securities) {
+    const s = state.securities[sym];
+    if (s.grp !== grp) continue;
+    const chgRate = s.changeRate ?? 0;
+    const clr = chgRate >= 0 ? 'var(--green)' : 'var(--red)';
+    const sign = chgRate >= 0 ? '▲' : '▼';
+    html += `<div class="ticker-row" data-symbol="${sym}" onclick="pickSymbol('${sym}')">
+      <div class="ticker-left">
+        <div class="ticker-sym">${sym.replace('.TW','')}</div>
+        <div class="ticker-name">${s.name}</div>
+      </div>
+      <div class="ticker-right">
+        <div class="ticker-price" style="color:${clr}">${s.price.toFixed(s.price < 100 ? 2 : 0)}</div>
+        <div class="ticker-chg" style="color:${clr}">${sign} ${Math.abs(chgRate).toFixed(2)}%</div>
+      </div>
+    </div>`;
+  }
+  qs('ticker-list').innerHTML = html || '<div class="empty-state">無商品資料</div>';
+}
+
+// ========== ORDER UI ==========
+function setGroup(grp) {
+  state.group = grp;
+  qs('grp-etf').className = 'group-btn' + (grp === 'etf' ? ' etf-active' : '');
+  qs('grp-stk').className = 'group-btn' + (grp === 'stock' ? ' stk-active' : '');
+  updateOrderSymbols(); renderTickers(); updateNavMini(); renderPositions();
+}
+
+function setDir(dir) {
+  state.currentDir = dir;
+  qs('dir-buy').className = 'dir-btn' + (dir === 'buy' ? ' active-buy' : '');
+  qs('dir-sell').className = 'dir-btn' + (dir === 'sell' ? ' active-sell' : '');
+}
+
+function updateOrderSymbols() {
+  const sel = qs('order-symbol');
+  sel.innerHTML = '<option value="">— 請選擇商品 —</option>';
+  for (const sym in state.securities) {
+    if (state.securities[sym].grp === state.group)
+      sel.innerHTML += `<option value="${sym}">${sym.replace('.TW','')} — ${state.securities[sym].name}</option>`;
+  }
+  updateOrderPrice();
+}
+
+function pickSymbol(sym) {
+  const sel = qs('order-symbol');
+  if([...sel.options].some(o => o.value === sym)) { sel.value = sym; updateOrderPrice(); }
+  qs('order-symbol').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function onSymbolChange() { updateOrderPrice(); }
+function onQtyChange() { updateOrderPrice(); }
+
+function updateOrderPrice() {
+  const sym = qs('order-symbol').value;
+  const qty = parseInt(qs('order-qty').value) || 0;
+  if (!sym || !state.securities[sym]) {
+    qs('order-price').value = '—';
+    qs('order-amount').value = '—';
+    return;
+  }
+  const s = state.securities[sym];
+  qs('order-price').value = s.price.toFixed(s.price < 100 ? 2 : 0);
+  qs('order-amount').value = money(s.price * qty);
+}
+
+// ========== SCORECARD ==========
+function buildScoreDots() {
+  for (let q = 1; q <= 5; q++) {
+    const container = qs(`scores-${q}`);
+    container.innerHTML = '';
+    for (let v = 1; v <= 5; v++) {
+      const d = document.createElement('div');
+      d.className = 'sc-dot';
+      d.textContent = v;
+      d.onclick = () => setScore(q, v);
+      d.id = `sd-${q}-${v}`;
+      container.appendChild(d);
+    }
+  }
+}
+
+function setScore(q, v) {
+  state.scores[q] = v;
+  for (let i = 1; i <= 5; i++) {
+    const el = qs(`sd-${q}-${i}`);
+    if (!el) continue;
+    el.className = 'sc-dot' + (i === v ? ` s${v}` : '');
+  }
+  updateScTotal();
+}
+
+function updateScTotal() {
+  const total = Object.values(state.scores).reduce((a,b) => a+b, 0);
+  setText('sc-total', total);
+  const badge = qs('sc-level-badge');
+  if (total === 0) { badge.textContent = '尚未評分'; badge.className = 'badge badge-pending'; }
+  else if (total < 10) { badge.textContent = '高風險'; badge.className = 'badge badge-rejected'; }
+  else if (total < 16) { badge.textContent = '中等'; badge.className = 'badge badge-pending'; }
+  else if (total < 21) { badge.textContent = '良好'; badge.className = 'badge badge-executed'; }
+  else { badge.textContent = '優秀'; badge.className = 'badge badge-etf'; }
+}
+
+function openScorecard() {
+  const sym = qs('order-symbol').value;
+  const qty = parseInt(qs('order-qty').value) || 0;
+  if (!sym) { toast('請先選擇商品','warn'); return; }
+  if (!qty || qty < 1) { toast('請輸入有效數量','warn'); return; }
+  const s = state.securities[sym];
+  const dir = state.currentDir;
+  state.scores = {};
+  buildScoreDots();
+  qs('sc-summary').innerHTML = `
+    <div class="sc-sum-item"><div class="sc-sum-label">商品</div><div class="sc-sum-val">${sym.replace('.TW','')} ${s.name}</div></div>
+    <div class="sc-sum-item"><div class="sc-sum-label">方向</div><div class="sc-sum-val" style="color:${dir==='buy'?'var(--green)':'var(--red)'}">${dir==='buy'?'買入':'賣出'}</div></div>
+    <div class="sc-sum-item"><div class="sc-sum-label">數量</div><div class="sc-sum-val">${qty}</div></div>
+    <div class="sc-sum-item"><div class="sc-sum-label">預估金額</div><div class="sc-sum-val">${money(s.price*qty)}</div></div>
+  `;
+  updateScTotal();
+  [1,2,3,4,5].forEach(i => { const el = qs(`sc${i}`); if(el) el.value=''; });
+  qs('modal-scorecard').classList.add('open');
+}
+
+function closeScorecard() { qs('modal-scorecard').classList.remove('open'); }
+
+async function submitOrder() {
+  const grp = state.group;
+  const g = state.groups[grp];
+  const sym = qs('order-symbol').value;
+  const qty = parseInt(qs('order-qty').value) || 0;
+  const dir = state.currentDir;
+
+  if (g.frozen) { toast('此組別已凍結，無法下單','danger'); closeScorecard(); return; }
+  if (Object.keys(state.scores).length < 5) { toast('請完成所有 5 項評分','warn'); return; }
+
+  const s = state.securities[sym];
+  const total = Object.values(state.scores).reduce((a,b)=>a+b,0);
+  const reasons = {};
+  [1,2,3,4,5].forEach(i => { const el = qs(`sc${i}`); reasons[i] = el ? el.value : ''; });
+
+  const order = {
+    id: uid(), time: nowTime(), symbol: sym, name: s.name,
+    qty, side: dir, price: s.price, amount: s.price * qty,
+    grp, status: 'pending', comment: '',
+    scorecard: { scores: { ...state.scores }, total, reasons }
+  };
+
+  closeScorecard();
+  const { error } = await db.from('orders').insert([order]);
+  if (error) toast('送單失敗：' + error.message, 'danger');
+  else toast('訂單已送交風控審核', 'info');
+}
+
+// ========== REVIEW ==========
+function openReview(id) {
+  const o = state.orders.find(x => x.id === id);
+  if (!o) return;
+  state.reviewId = id;
+  const sc = o.scorecard;
+  const qLabels = ['技術面訊號','基本面依據','停損設定','倉位合理性','目標報酬'];
+  let html = `
+    <div style="background:var(--bg3);border-radius:8px;padding:12px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:10px">
+      <div class="sc-sum-item"><div class="sc-sum-label">商品</div><div class="sc-sum-val">${o.symbol.replace('.TW','')} ${o.name}</div></div>
+      <div class="sc-sum-item"><div class="sc-sum-label">方向</div><div class="sc-sum-val" style="color:${o.side==='buy'?'var(--green)':'var(--red)'}">${o.side==='buy'?'買入':'賣出'}</div></div>
+      <div class="sc-sum-item"><div class="sc-sum-label">數量</div><div class="sc-sum-val">${o.qty}</div></div>
+      <div class="sc-sum-item"><div class="sc-sum-label">金額</div><div class="sc-sum-val">${money(o.amount)}</div></div>
+    </div>
+    <div style="margin-bottom:12px">`;
+  for (let i = 1; i <= 5; i++) {
+    const v = sc.scores[i] || 0;
+    const clr = v >= 4 ? 'var(--green)' : v >= 3 ? 'var(--blue)' : v >= 2 ? 'var(--amber)' : 'var(--red)';
+    html += `<div class="review-sc-row">
+      <div class="sc-q-num">${i}</div>
+      <div style="flex:1">
+        <div class="review-sc-q">${qLabels[i-1]}</div>
+        <div class="review-sc-reason">${sc.reasons[i]||'（未填寫）'}</div>
+      </div>
+      <div style="font-family:var(--mono);font-size:14px;font-weight:600;color:${clr}">${v}/5</div>
+    </div>`;
+  }
+  html += `</div>
+    <div style="background:var(--bg3);border-radius:8px;padding:12px;display:flex;justify-content:space-between;align-items:center">
+      <span style="color:var(--text2);font-size:13px">計分卡總分</span>
+      <span style="font-family:var(--mono);font-size:22px;font-weight:700;color:${sc.total>=16?'var(--green)':sc.total>=10?'var(--blue)':'var(--red)'}">${sc.total} <span style="font-size:14px;color:var(--text3)">/ 25</span></span>
+    </div>`;
+  qs('review-content').innerHTML = html;
+  qs('review-comment').value = '';
+  qs('modal-review').classList.add('open');
+}
+
+function closeReview() { qs('modal-review').classList.remove('open'); }
+
+async function approveOrder() {
+  const id = state.reviewId;
+  const comment = qs('review-comment').value || '風控核准';
+  const { error } = await db.from('orders').update({ status: 'executed', comment }).eq('id', id);
+  if (!error) closeReview();
+}
+
+async function rejectOrder() {
+  const id = state.reviewId;
+  const comment = qs('review-comment').value || '風控駁回';
+  const { error } = await db.from('orders').update({ status: 'rejected', comment }).eq('id', id);
+  if (!error) closeReview();
+}
+
+function executeOrder(order) {
+  const g = state.groups[order.group];
+  const cost = order.price * order.qty;
+  if (order.side === 'buy') {
+    if (g.cash < cost) return;
+    g.cash -= cost;
+    const ex = g.positions.find(p => p.symbol === order.symbol);
+    if (ex) { ex.avgPrice = (ex.avgPrice * ex.qty + cost) / (ex.qty + order.qty); ex.qty += order.qty; }
+    else g.positions.push({ symbol: order.symbol, qty: order.qty, avgPrice: order.price });
+  } else {
+    const pos = g.positions.find(p => p.symbol === order.symbol);
+    if (!pos || pos.qty < order.qty) return;
+    g.cash += cost;
+    pos.qty -= order.qty;
+    if (pos.qty === 0) g.positions = g.positions.filter(p => p.symbol !== order.symbol);
+  }
+  g.tradeCount++;
+  const nav = calcNAV(order.group);
+  const prev = g.navHistory.length ? g.navHistory[g.navHistory.length-1].nav : INITIAL;
+  g.returns.push((nav - prev) / prev * 100);
+  g.navHistory.push({ t: Date.now(), nav });
+}
+
+// ========== METRICS ==========
+function calcNAV(grp) {
+  const g = state.groups[grp];
+  let mv = 0;
+  for (const p of g.positions) {
+    const s = state.securities[p.symbol];
+    if (s) mv += s.price * p.qty;
+  }
+  return g.cash + mv;
+}
+
+function calcDD(grp) {
+  const g = state.groups[grp];
+  const nav = calcNAV(grp);
+  if (nav > g.peakNAV) g.peakNAV = nav;
+  const dd = g.peakNAV > 0 ? (g.peakNAV - nav) / g.peakNAV * 100 : 0;
+  if (dd > g.maxDD) g.maxDD = dd;
+  return dd;
+}
+
+function calcSharpe(grp) {
+  const rets = state.groups[grp].returns;
+  if (rets.length < 2) return null;
+  const avg = rets.reduce((a,b) => a+b, 0) / rets.length;
+  const std = Math.sqrt(rets.reduce((s,r) => s + (r-avg)**2, 0) / rets.length);
+  return std > 0 ? (avg / std * Math.sqrt(252)).toFixed(2) : null;
+}
+
+function calcUtil(grp) {
+  const g = state.groups[grp];
+  const nav = calcNAV(grp);
+  let mv = 0;
+  for (const p of g.positions) {
+    const s = state.securities[p.symbol];
+    if (s) mv += s.price * p.qty;
+  }
+  return nav > 0 ? (mv / nav * 100).toFixed(1) : 0;
+}
+
+function updateAllMetrics() {
+  // Update risk panel metrics
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups[grp];
+    const dd = calcDD(grp);
+    const lim = grp === 'etf' ? state.limits.etf : state.limits.stk;
+    const ddPct = Math.min(dd / lim * 100, 100);
+    const prefix = grp === 'etf' ? 'etf' : 'stk';
+    const barCls = dd > lim * 0.8 ? 'danger' : dd > lim * 0.5 ? 'warn' : 'ok';
+
+    setText(`${prefix}-dd-label`, `${dd.toFixed(1)}% / ${lim}%`);
+    setText(`${prefix}-dd-val`, dd.toFixed(2) + '%', dd > lim * 0.8 ? 'var(--red)' : dd > lim * 0.5 ? 'var(--amber)' : 'var(--green)');
+    const bar = qs(`${prefix}-dd-bar`);
+    if (bar) { bar.style.width = ddPct + '%'; bar.className = `risk-bar-fill ${barCls}`; }
+    setText(`${prefix}-util`, calcUtil(grp) + '%');
+    const sh = calcSharpe(grp);
+    setText(`${prefix}-sharpe`, sh || '—', sh > 1 ? 'var(--green)' : sh > 0 ? 'var(--blue)' : sh != null ? 'var(--red)' : null);
+
+    // Freeze buttons
+    const unEl = qs(`unfreeze-${prefix}`);
+    const fcEl = qs(`forceclose-${prefix === 'etf' ? 'etf' : 'stk'}`);
+    if (unEl) unEl.style.display = g.frozen ? '' : 'none';
+    if (fcEl) fcEl.style.display = g.frozen ? 'none' : '';
+
+    // Freeze banner on trade tab
+    const fb = qs(`freeze-${grp}`);
+    if (fb) fb.style.display = g.frozen ? 'flex' : 'none';
+
+    // Auto force close
+    if (dd > lim && !g.frozen && g.positions.length > 0) {
+      toast(`${g.name} 回撤超限！系統強制平倉`, 'danger');
+      forceClose(grp, true);
+    }
+  }
+
+  // Pending badge
+  setText('pending-badge', state.pendingApproval.length + ' 筆');
+  renderPendingList();
+  renderPositions();
+  updateNavMini();
+}
+
+function updateNavMini() {
+  const grp = state.group;
+  const g = state.groups[grp];
+  const nav = calcNAV(grp);
+  const ret = (nav - INITIAL) / INITIAL * 100;
+  setText('nav-label', grp === 'etf' ? 'ETF 組 NAV' : '個股組 NAV');
+  setText('mini-nav', money(nav), ret >= 0 ? 'var(--green)' : 'var(--red)');
+  setText('mini-ret', pct(ret), ret >= 0 ? 'var(--green)' : 'var(--red)');
+  const mv = nav - g.cash;
+  setText('mini-cash', money(g.cash));
+}
+
+function renderPositions() {
+  const grp = state.group;
+  const g = state.groups[grp];
+  const nav = calcNAV(grp);
+  setText('pos-count', g.positions.length + ' 筆');
+  if (!g.positions.length) {
+    qs('positions-list').innerHTML = '<div class="empty-state">尚無持倉</div>';
+    return;
+  }
+  qs('positions-list').innerHTML = g.positions.map(p => {
+    const s = state.securities[p.symbol];
+    const cur = s ? s.price : p.avgPrice;
+    const pnl = (cur - p.avgPrice) * p.qty;
+    const pnlPct = (cur - p.avgPrice) / p.avgPrice * 100;
+    const mv = cur * p.qty;
+    const wt = nav > 0 ? (mv / nav * 100).toFixed(1) : 0;
+    const cl = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<div class="pos-item">
+      <div class="pos-top">
+        <div>
+          <div class="pos-sym">${p.symbol.replace('.TW','')} <span style="font-size:12px;color:var(--text2);font-family:var(--sans)">${s?s.name:''}</span></div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">持有 ${p.qty} 股 · 均價 ${p.avgPrice.toFixed(p.avgPrice<100?2:0)}</div>
+        </div>
+        <div class="pos-pnl" style="color:${cl}">
+          ${pnl>=0?'+':''}${pnl.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',')}
+          <div style="font-size:11px">${pct(pnlPct)}</div>
+        </div>
+      </div>
+      <div class="pos-detail">
+        <div class="pos-detail-item">現價 <span>${cur.toFixed(cur<100?2:0)}</span></div>
+        <div class="pos-detail-item">倉位佔比 <span>${wt}%</span></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderPendingList() {
+  if (!state.pendingApproval.length) {
+    qs('pending-list').innerHTML = '<div class="empty-state">目前無待審訂單</div>';
+    return;
+  }
+  qs('pending-list').innerHTML = state.pendingApproval.map(o => `
+    <div class="order-item">
+      <div class="order-top">
+        <div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="order-sym">${o.symbol.replace('.TW','')}</span>
+            <span class="badge badge-${o.side}">${o.side==='buy'?'買':'賣'}</span>
+            <span class="badge badge-${o.group}">${o.group==='etf'?'ETF':'個股'}</span>
+          </div>
+          <div class="order-meta">${o.qty} 股 · 計分 ${o.scorecard.total}/25 · ${o.time}</div>
+        </div>
+        <div>
+          <div class="order-amount">${money(o.amount)}</div>
+          <button class="btn btn-sm btn-primary" style="margin-top:6px;width:100%" onclick="openReview('${o.id}')">審核</button>
+        </div>
+      </div>
+    </div>`).join('');
+}
+
+// ========== RISK ACTIONS ==========
+function unfreezeGroup(grp) {
+  state.groups[grp].frozen = false;
+  toast(`${state.groups[grp].name} 已解除凍結`, 'success');
+  updateAllMetrics();
+}
+
+function forceClose(grp, auto = false) {
+  const g = state.groups[grp];
+  for (const p of [...g.positions]) {
+    const s = state.securities[p.symbol];
+    if (s) g.cash += s.price * p.qty;
+  }
+  g.positions = []; g.frozen = true;
+  toast(`${g.name} 強制平倉完成，已凍結`, 'danger');
+  updateAllMetrics();
+}
+
+function settleNAV() {
+  for (const grp of ['etf','stock']) {
+    const nav = calcNAV(grp);
+    state.groups[grp].navHistory.push({ t: Date.now(), nav });
+  }
+  toast('NAV 結算已記錄', 'success');
+  renderNavChart();
+}
+
+function updateLimits() {
+  state.limits.etf = parseFloat(qs('etf-dd-limit').value) || 10;
+  state.limits.stk = parseFloat(qs('stk-dd-limit').value) || 10;
+  updateAllMetrics();
+}
+
+function resetAll() {
+  if (!confirm('確定重置所有資料？此操作無法復原。')) return;
+  state.groups.etf = mkGroup('ETF 組');
+  state.groups.stock = mkGroup('個股組');
+  state.orders = []; state.pendingApproval = [];
+  toast('沙盒已重置，重新開始', 'info');
+  updateAllMetrics(); renderNavChart();
+}
+
+// ========== NAV CHART ==========
+let navChart = null;
+function renderNavChart() {
+  const el = qs('nav-chart'); if (!el) return;
+  const eH = state.groups.etf.navHistory;
+  const sH = state.groups.stock.navHistory;
+  const maxL = Math.max(eH.length, sH.length, 2);
+  const labels = Array.from({length:maxL}, (_,i) => i===0?'開始':'D'+i);
+  const eData = eH.map(h => Math.round(h.nav));
+  const sData = sH.map(h => Math.round(h.nav));
+  while(eData.length < maxL) eData.push(eData[eData.length-1]);
+  while(sData.length < maxL) sData.push(sData[sData.length-1]);
+  if (navChart) navChart.destroy();
+  navChart = new Chart(el, {
+    type: 'line',
+    data: { labels, datasets: [
+      { label:'ETF', data:eData, borderColor:'#2dd4bf', backgroundColor:'rgba(45,212,191,.07)', borderWidth:2, pointRadius:2, tension:.35, fill:true },
+      { label:'個股', data:sData, borderColor:'#fbbf24', backgroundColor:'rgba(251,191,36,.07)', borderWidth:2, pointRadius:2, tension:.35, fill:true }
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: true, labels: { color:'#8892a4', font:{size:11}, boxWidth:12 } } },
+      scales: {
+        x: { grid:{color:'rgba(255,255,255,.04)'}, ticks:{color:'#4a5568',font:{size:10}} },
+        y: { grid:{color:'rgba(255,255,255,.04)'}, ticks:{color:'#4a5568',font:{size:10}, callback: v=>'$'+Math.round(v/1000000)+'M'} }
+      }
+    }
+  });
+}
+
+// ========== HISTORY ==========
+function setHistGroup(grp) {
+  state.histGroup = grp;
+  qs('hist-etf').className = 'group-btn' + (grp==='etf' ? ' etf-active' : '');
+  qs('hist-stk').className = 'group-btn' + (grp==='stock' ? ' stk-active' : '');
+  renderHistory();
+}
+
+function renderHistory() {
+  const grp = state.histGroup;
+  const g = state.groups[grp];
+  const nav = calcNAV(grp);
+  const ret = (nav - INITIAL) / INITIAL * 100;
+  const orders = state.orders.filter(o => o.group === grp);
+  const execOrders = orders.filter(o => o.status === 'executed');
+  const avgSc = execOrders.length ? (execOrders.reduce((s,o) => s+(o.scorecard.total||0), 0) / execOrders.length).toFixed(1) : '—';
+
+  setText('hist-ret', pct(ret), ret >= 0 ? 'var(--green)' : 'var(--red)');
+  setText('hist-trades', `${g.tradeCount} 筆成交`);
+  setText('hist-avg-sc', avgSc);
+
+  // Attribution
+  const beta = Math.max(5, Math.min(70, 55 + ret));
+  const alpha = Math.max(5, 100 - beta - 20);
+  const noise = 100 - beta - alpha;
+  const hasData = g.tradeCount > 0;
+  qs('attr-section').innerHTML = hasData ? `
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px">Beta 市場 / Alpha 主動 / Noise 雜訊</div>
+    <div class="attr-bar">
+      <div class="attr-beta" style="width:${beta}%">β${beta}%</div>
+      <div class="attr-alpha" style="width:${alpha}%">α${alpha}%</div>
+      <div class="attr-noise" style="width:${noise}%">~</div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-top:6px">Alpha 比例越高，代表主動判斷力越強</div>
+  ` : '<div class="empty-state" style="padding:20px">成交後自動產出</div>';
+
+  // Order list
+  if (!orders.length) {
+    qs('order-history-list').innerHTML = '<div class="empty-state">尚無訂單</div>';
+    return;
+  }
+  qs('order-history-list').innerHTML = [...orders].reverse().map(o => `
+    <div class="order-item">
+      <div class="order-top">
+        <div>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span class="order-sym">${o.symbol.replace('.TW','')}</span>
+            <span class="badge badge-${o.side}">${o.side==='buy'?'買入':'賣出'}</span>
+            <span class="badge badge-${o.status}">${{pending:'待審',executed:'成交',rejected:'駁回'}[o.status]}</span>
+          </div>
+          <div class="order-meta">${o.qty} 股 · 計分 ${o.scorecard.total}/25 · ${o.time}</div>
+          ${o.comment ? `<div style="font-size:11px;color:var(--text3);margin-top:2px">💬 ${o.comment}</div>` : ''}
+        </div>
+        <div class="order-amount">${money(o.amount)}</div>
+      </div>
+    </div>`).join('');
+}
+
+// ========== INIT ==========
+async function init() {
+  setupRealtime();
+  await fetchInitialPrices();
+  updateAllMetrics();
+  await triggerPriceUpdate();
+  setInterval(triggerPriceUpdate, 10000);
+}
+
+init();
+</script>
+</body>
+</html>
