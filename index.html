@@ -1237,9 +1237,7 @@ function debugLog(...args) {
   }).join(' ');
   console.log(...args);
   if (el) {
-    el.textContent = `[${new Date().toLocaleTimeString('zh-TW', { hour12: false })}] ${line}
-
-` + el.textContent;
+    el.textContent = `[${new Date().toLocaleTimeString('zh-TW', { hour12: false })}] ${line}\n\n` + el.textContent;
   }
 }
 
@@ -1914,6 +1912,7 @@ setInterval(updateMarketStatusBanner, 10000);
 
 function openScorecard() { submitMarketOrder(); }
 function closeScorecard() { const m = qs('modal-scorecard'); if (m) m.classList.remove('open'); }
+
 // 全域變數：暫存準備送出的訂單資料
 let pendingOrderData = null;
 
@@ -2045,67 +2044,6 @@ async function executeMarketOrder() {
   
   // 完成後關閉視窗
   closeOrderConfirmModal();
-}
-
-  if (!qty || qty < 1) { toast('請輸入有效數量', 'warn'); return; }
-  if (g.frozen) { toast('此組別已凍結，無法交易', 'danger'); return; }
-
-  const constraintErr = checkOrderConstraints(sym, qty, dir, grp);
-  if (constraintErr) {
-    toast('違反投資限制：' + constraintErr, 'danger');
-    return;
-  }
-
-  const s = state.securities[sym];
-  const execPrice = +s.price;
-  const amount = Math.round(execPrice * qty);
-  const feeRate = 0.0004;
-  const feeAmount = Math.round(amount * feeRate);
-  const taxRate = dir === 'sell' ? getSellTaxRate(sym, grp) : 0;
-  const taxAmount = Math.round(amount * taxRate);
-  const settlementAmount = dir === 'buy'
-    ? amount + feeAmount + taxAmount
-    : amount - feeAmount - taxAmount;
-
-  const order = {
-    id: uid(),
-    time: nowTime(),
-    symbol: sym,
-    name: s.name,
-    qty,
-    side: dir,
-    price: execPrice,
-    amount,
-    grp,
-    status: 'executed',
-    comment: '市價直接成交',
-    settlement_date: getSettlementDate(),
-    settlement_price: execPrice,
-    fee_rate: feeRate,
-    fee_amount: feeAmount,
-    tax_rate: taxRate,
-    tax_amount: taxAmount,
-    settlement_amount: settlementAmount,
-    scorecard: {}
-  };
-
-  const { error } = await db.from('orders').insert([order]);
-  if (error) {
-    toast('成交失敗：' + error.message, 'danger');
-    return;
-  }
-
-  qs('order-symbol-input').value = sym.replace('.TW','').replace('.TWO','');
-  qs('order-symbol').value = sym;
-  qs('order-qty').value = '1000';
-  updateAllMetrics();
-  renderPositions();
-  renderPerformanceReport();
-  renderTradeReport();
-  renderViolations();
-  renderNavChart();
-  refreshPriceOnlyUI([sym]);
-  toast(`已${dir === 'buy' ? '買入' : '賣出'} ${sym.replace('.TW','').replace('.TWO','')}，成交價 ${formatPrice(execPrice)}`, 'success');
 }
 
 // ========== REVIEW ==========
@@ -3669,7 +3607,9 @@ async function init() {
 
 init();
 </script>
-  <div class="modal-bg" id="modal-order-confirm">
+
+<!-- 下單雙重確認 Modal -->
+<div class="modal-bg" id="modal-order-confirm">
   <div class="modal">
     <div class="modal-handle"></div>
     <div class="modal-header">
@@ -3713,5 +3653,6 @@ init();
     </div>
   </div>
 </div>
+
 </body>
 </html>
