@@ -1914,8 +1914,11 @@ setInterval(updateMarketStatusBanner, 10000);
 
 function openScorecard() { submitMarketOrder(); }
 function closeScorecard() { const m = qs('modal-scorecard'); if (m) m.classList.remove('open'); }
+// 全域變數：暫存準備送出的訂單資料
+let pendingOrderData = null;
 
-async function submitMarketOrder() {
+// 1. 按下首頁下單按鈕時：進行驗證並開啟確認視窗
+function submitMarketOrder() {
   const grp = state.group;
   const g = state.groups[grp];
   const rawInput = qs('order-symbol-input').value.trim().toUpperCase();
@@ -1929,6 +1932,121 @@ async function submitMarketOrder() {
     toast('請先新增商品資料', 'warn');
     return;
   }
+  if (!qty || qty < 1) { toast('請輸入有效數量', 'warn'); return; }
+  if (g.frozen) { toast('此組別已凍結，無法交易', 'danger'); return; }
+
+  const constraintErr = checkOrderConstraints(sym, qty, dir, grp);
+  if (constraintErr) {
+    toast('違反投資限制：' + constraintErr, 'danger');
+    return;
+  }
+
+  const s = state.securities[sym];
+  const execPrice = +s.price;
+  const amount = Math.round(execPrice * qty);
+
+  // 將資料暫存到全域變數，供確認後使用
+  pendingOrderData = { sym, qty, dir, grp, execPrice, amount, s };
+
+  // 填充確認 Modal 上的資訊
+  const dirText = dir === 'buy' ? '買入' : '賣出';
+  const dirColor = dir === 'buy' ? 'var(--green)' : 'var(--red)';
+  
+  setText('confirm-dir', dirText, dirColor);
+  setText('confirm-sym', sym.replace('.TW', '').replace('.TWO', ''));
+  setText('confirm-qty', qty + ' 股');
+  setText('confirm-price', formatPrice(execPrice));
+  setText('confirm-amount', money(amount));
+
+  // 動態調整確認按鈕顏色，讓買賣視覺更直覺
+  const confirmBtn = qs('confirm-submit-btn');
+  if (confirmBtn) {
+    confirmBtn.className = dir === 'buy' ? 'btn btn-buy' : 'btn btn-sell';
+    confirmBtn.style.flex = '2';
+  }
+
+  // 開啟 Modal
+  qs('modal-order-confirm').classList.add('open');
+}
+
+// 2. 關閉確認視窗
+function closeOrderConfirmModal() {
+  qs('modal-order-confirm').classList.remove('open');
+  pendingOrderData = null; // 清除暫存資料
+}
+
+// 3. 在確認視窗按下「確認下單」後：實際送出資料庫
+async function executeMarketOrder() {
+  if (!pendingOrderData) return;
+
+  // 防呆機制：防止使用者連點兩次造成重複下單
+  const confirmBtn = qs('confirm-submit-btn');
+  const originalText = confirmBtn.textContent;
+  confirmBtn.textContent = '處理中...';
+  confirmBtn.disabled = true;
+
+  const { sym, qty, dir, grp, execPrice, amount, s } = pendingOrderData;
+
+  const feeRate = 0.0004;
+  const feeAmount = Math.round(amount * feeRate);
+  const taxRate = dir === 'sell' ? getSellTaxRate(sym, grp) : 0;
+  const taxAmount = Math.round(amount * taxRate);
+  const settlementAmount = dir === 'buy'
+    ? amount + feeAmount + taxAmount
+    : amount - feeAmount - taxAmount;
+
+  const order = {
+    id: uid(),
+    time: nowTime(),
+    symbol: sym,
+    name: s.name,
+    qty,
+    side: dir,
+    price: execPrice,
+    amount,
+    grp,
+    status: 'executed',
+    comment: '市價直接成交',
+    settlement_date: getSettlementDate(),
+    settlement_price: execPrice,
+    fee_rate: feeRate,
+    fee_amount: feeAmount,
+    tax_rate: taxRate,
+    tax_amount: taxAmount,
+    settlement_amount: settlementAmount,
+    scorecard: {}
+  };
+
+  const { error } = await db.from('orders').insert([order]);
+
+  // 恢復按鈕狀態
+  confirmBtn.textContent = originalText;
+  confirmBtn.disabled = false;
+
+  if (error) {
+    toast('成交失敗：' + error.message, 'danger');
+    closeOrderConfirmModal();
+    return;
+  }
+
+  // 成功後的 UI 更新
+  qs('order-symbol-input').value = sym.replace('.TW','').replace('.TWO','');
+  qs('order-symbol').value = sym;
+  qs('order-qty').value = '1000';
+  updateAllMetrics();
+  renderPositions();
+  renderPerformanceReport();
+  renderTradeReport();
+  renderViolations();
+  renderNavChart();
+  refreshPriceOnlyUI([sym]);
+  
+  toast(`已${dir === 'buy' ? '買入' : '賣出'} ${sym.replace('.TW','').replace('.TWO','')}，成交價 ${formatPrice(execPrice)}`, 'success');
+  
+  // 完成後關閉視窗
+  closeOrderConfirmModal();
+}
+
   if (!qty || qty < 1) { toast('請輸入有效數量', 'warn'); return; }
   if (g.frozen) { toast('此組別已凍結，無法交易', 'danger'); return; }
 
@@ -3551,5 +3669,49 @@ async function init() {
 
 init();
 </script>
+  <div class="modal-bg" id="modal-order-confirm">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-header">
+      <span class="modal-title">確認下單資訊</span>
+      <button class="modal-close" onclick="closeOrderConfirmModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="metric-row" style="margin-bottom: 8px;">
+        <div class="metric">
+          <div class="metric-label">交易方向</div>
+          <div class="metric-val" id="confirm-dir">買入</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">商品代號</div>
+          <div class="metric-val neutral" id="confirm-sym">—</div>
+        </div>
+      </div>
+      <div class="metric-row">
+        <div class="metric">
+          <div class="metric-label">委託數量</div>
+          <div class="metric-val neutral" id="confirm-qty">—</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">預估市價</div>
+          <div class="metric-val neutral" id="confirm-price">—</div>
+        </div>
+      </div>
+      <div class="sc-total-row" style="margin-top: 0;">
+        <div class="sc-total-label">預估總金額</div>
+        <div class="sc-total-val" id="confirm-amount" style="color: var(--teal)">—</div>
+      </div>
+      <div style="font-size:13px;color:var(--text3);margin-top:12px;line-height:1.5;">
+        * 註：實際成交價與手續費將以系統結算時的報價為準。
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div class="btn-row">
+        <button class="btn" onclick="closeOrderConfirmModal()">取消</button>
+        <button class="btn btn-primary" style="flex:2" id="confirm-submit-btn" onclick="executeMarketOrder()">確認下單</button>
+      </div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
