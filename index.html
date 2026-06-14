@@ -3709,6 +3709,32 @@ function getHeldQtyPatch(grp, sym) {
   return +(p?.qty || 0);
 }
 
+function normalizeCleanSymbolPatch(sym) {
+  return String(sym || '').toUpperCase().replace('.TW', '').replace('.TWO', '');
+}
+
+function resolveOrderSymbolPatch(raw, grp = state.group) {
+  const normalized = normalizeSymbolInput(raw);
+  const clean = normalizeCleanSymbolPatch(normalized || raw);
+  const visible = new Set([
+    ...(state.customTickers?.[grp] || []),
+    ...(state.groups?.[grp]?.positions || []).map(p => p.symbol)
+  ]);
+  const candidates = [
+    normalized,
+    clean,
+    clean + '.TW',
+    clean + '.TWO',
+    ...Object.keys(state.securities || {}).filter(key => normalizeCleanSymbolPatch(key) === clean)
+  ].filter(Boolean);
+
+  const visibleHit = candidates.find(sym => visible.has(sym) && state.securities[sym]);
+  if (visibleHit) return visibleHit;
+  const pricedHit = candidates.find(sym => state.securities[sym] && getSecurityPricePatch(sym) != null);
+  if (pricedHit) return pricedHit;
+  return candidates.find(sym => state.securities[sym]) || normalized;
+}
+
 function isTradingDayPatch(d = getTWNTime()) {
   const day = d.getDay();
   return day !== 0 && day !== 6;
@@ -3874,11 +3900,13 @@ function ensureAdjustmentUI() {
         <input type="number" id="adjust-value" min="0" step="1" placeholder="股息填金額，股數調整填新增股數">
       </div>
       <button class="btn btn-full btn-primary" onclick="submitPortfolioAdjustmentPatch()">新增調整</button>
+      <div id="adjust-history-list" style="margin-top:14px"></div>
     </div>
   `;
   riskCol.appendChild(card);
   const dateEl = document.getElementById('adjust-date');
   if (dateEl && !dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10);
+  renderAdjustmentHistoryPatch();
 }
 
 async function submitPortfolioAdjustmentPatch() {
@@ -3903,14 +3931,77 @@ async function submitPortfolioAdjustmentPatch() {
     cash_amount: eventType === 'cash_dividend' ? value : 0,
     share_delta: eventType === 'stock_dividend' ? value : 0
   };
-  const { error } = await db.from('portfolio_events').insert([ev]);
+  const { data, error } = await db.from('portfolio_events').insert([ev]).select('*').single();
   if (error) { toast('新增調整失敗：' + error.message, 'danger'); return; }
-  state.portfolioEvents.push(ev);
+  state.portfolioEvents.push(data || ev);
   rebuildPortfolioFromTimeline();
   updateAllMetrics();
   renderHistory();
   qs('adjust-value').value = '';
   toast(eventType === 'cash_dividend' ? '已新增股息調整' : '已新增股數調整', 'success');
+}
+
+function isVoidedPortfolioEventPatch(ev) {
+  return String(ev?.event_type || '').startsWith('voided_');
+}
+
+function renderAdjustmentHistoryPatch() {
+  const list = qs('adjust-history-list');
+  if (!list) return;
+  const events = [...(state.portfolioEvents || [])]
+    .sort((a, b) => `${b.event_date || ''} ${b.created_at || ''}`.localeCompare(`${a.event_date || ''} ${a.created_at || ''}`))
+    .slice(0, 20);
+  if (!events.length) {
+    list.innerHTML = '<div class="empty-state" style="padding:12px">尚無人工調整紀錄</div>';
+    return;
+  }
+  list.innerHTML = `
+    <div style="font-size:13px;color:var(--text3);margin-bottom:8px">最近人工調整 / 除權息紀錄</div>
+    ${events.map(ev => {
+      const voided = isVoidedPortfolioEventPatch(ev);
+      const type = String(ev.event_type || '').replace('voided_', '');
+      const value = type === 'cash_dividend'
+        ? `現金 ${money(ev.cash_amount || 0)}`
+        : `股數 +${Number(ev.share_delta || 0)}`;
+      return `
+        <div class="order-item" style="padding:10px 0">
+          <div class="order-top">
+            <div style="flex:1;min-width:0">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span class="order-sym">${normalizeCleanSymbolPatch(ev.symbol || '')}</span>
+                <span class="badge badge-${(ev.grp || ev.group) === 'etf' ? 'etf' : 'stock'}">${(ev.grp || ev.group) === 'etf' ? 'ETF' : '個股'}</span>
+                <span class="badge badge-pending">${voided ? '已退回' : (type === 'cash_dividend' ? '股息' : '股數')}</span>
+              </div>
+              <div class="order-meta">${ev.event_date || '—'} · ${value}</div>
+            </div>
+            ${voided ? '' : `<button class="btn btn-sm btn-sell" onclick="voidPortfolioEventPatch('${ev.id || ''}')">退回</button>`}
+          </div>
+        </div>
+      `;
+    }).join('')}
+  `;
+}
+
+async function voidPortfolioEventPatch(id) {
+  if (!id) {
+    toast('這筆調整缺少 id，無法退回', 'danger');
+    return;
+  }
+  const ev = state.portfolioEvents.find(x => x.id === id);
+  if (!ev || isVoidedPortfolioEventPatch(ev)) return;
+  if (!confirm('確定退回這筆人工調整？退回後會保留紀錄，但不再納入 NAV 與損益計算。')) return;
+  const nextType = 'voided_' + String(ev.event_type || '');
+  const { error } = await db.from('portfolio_events').update({ event_type: nextType }).eq('id', id);
+  if (error) {
+    toast('退回調整失敗：' + error.message, 'danger');
+    return;
+  }
+  ev.event_type = nextType;
+  rebuildPortfolioFromTimeline();
+  updateAllMetrics();
+  renderHistory();
+  renderTradeReport();
+  toast('已退回該筆調整', 'success');
 }
 
 function updateOrderPrice() {
@@ -3925,6 +4016,56 @@ function updateOrderPrice() {
   qs('order-price').value = price == null ? '報價失敗' : formatPrice(price);
   qs('order-amount').value = price == null ? '—' : money(price * qty);
 }
+
+updateOrderSymbols = function updateOrderSymbolsPatched() {
+  const list = qs('symbol-datalist');
+  if (!list) return;
+  const grp = state.group;
+  const symbols = new Set([
+    ...(state.customTickers?.[grp] || []),
+    ...(state.groups?.[grp]?.positions || []).map(p => p.symbol)
+  ]);
+  list.innerHTML = [...symbols]
+    .filter(sym => state.securities[sym])
+    .map(sym => {
+      const s = state.securities[sym];
+      const clean = normalizeCleanSymbolPatch(sym);
+      return `<option value="${clean}">${s.name || clean}</option>`;
+    }).join('');
+};
+
+onSymbolInput = function onSymbolInputPatched() {
+  const raw = qs('order-symbol-input').value.trim().toUpperCase();
+  const nameEl = qs('order-symbol-name');
+  const hiddenSym = qs('order-symbol');
+
+  if (!raw) {
+    nameEl.innerHTML = '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--text3)"></span> 請輸入商品代號';
+    nameEl.style.color = 'var(--text)';
+    hiddenSym.value = '';
+    updateOrderPrice();
+    return;
+  }
+
+  const grp = inferGroupByRawSymbol(raw);
+  const matchedSym = resolveOrderSymbolPatch(raw, grp);
+  const matchedSec = state.securities[matchedSym];
+
+  if (matchedSec) {
+    const price = getSecurityPricePatch(matchedSym);
+    nameEl.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${price == null ? 'var(--amber)' : 'var(--green)'}"></span> ${matchedSec.name || normalizeCleanSymbolPatch(matchedSym)}${price == null ? ' · 報價尚未有效' : ''}`;
+    nameEl.style.color = price == null ? 'var(--amber)' : 'var(--green)';
+    hiddenSym.value = matchedSym;
+  } else {
+    const symbol = normalizeSymbolInput(raw);
+    const suggestedName = suggestSecurityName(symbol);
+    nameEl.innerHTML = '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--amber)"></span> 尚未建立商品資料，建議名稱：' + suggestedName;
+    nameEl.style.color = 'var(--amber)';
+    hiddenSym.value = symbol;
+  }
+
+  updateOrderPrice();
+};
 
 setupRealtime = function setupRealtimePatched() {
   db.channel('sec-changes')
@@ -4200,10 +4341,12 @@ function renderPendingList() {
   const count = qs('pending-count');
   if (!list) return;
   rebuildPendingOrderStatePatch();
-  const pending = [...state.pendingApproval, ...state.approvedPending];
+  const currentGroup = state.group || 'etf';
+  const pending = [...state.pendingApproval, ...state.approvedPending]
+    .filter(o => getOrderGroupPatch(o) === currentGroup);
   if (count) count.textContent = pending.length + ' 筆';
   if (!pending.length) {
-    list.innerHTML = '<div class="empty-state">目前沒有待成交委託</div>';
+    list.innerHTML = '<div class="empty-state">目前沒有本組待成交委託</div>';
     return;
   }
   list.innerHTML = pending.map(o => `
@@ -4220,11 +4363,86 @@ function renderPendingList() {
         </div>
         <div style="text-align:right;flex-shrink:0">
           <div class="order-amount">${money(o.amount || 0)}</div>
+          <button class="btn btn-sm btn-primary" style="margin-top:6px;width:100%" onclick="adjustPendingOrderQtyPatch('${o.id}')">調整股數</button>
           <button class="btn btn-sm btn-sell" style="margin-top:6px;width:100%" onclick="cancelPendingOrderPatch('${o.id}')">取消</button>
         </div>
       </div>
     </div>
   `).join('');
+}
+
+function getOrderGroupPatch(order) {
+  const direct = order?.group || order?.grp;
+  if (direct === 'etf' || direct === 'stock') return direct;
+  const sym = order?.symbol;
+  const secGrp = state.securities?.[sym]?.grp;
+  if (secGrp === 'etf' || secGrp === 'stock') return secGrp;
+  const inferred = inferGroupByRawSymbol(sym || '');
+  return inferred === 'stock' ? 'stock' : 'etf';
+}
+
+async function adjustPendingOrderQtyPatch(id) {
+  const order = state.orders.find(o => o.id === id);
+  if (!order) return;
+  if (!['pending', 'approved'].includes(order.status)) {
+    toast('只有待成交委託可以調整股數', 'warn');
+    return;
+  }
+  const oldQty = Number(order.qty || 0);
+  const raw = prompt('請輸入新的委託股數', String(oldQty || ''));
+  if (raw == null) return;
+  const qty = Math.floor(Number(raw));
+  if (!Number.isFinite(qty) || qty <= 0) {
+    toast('股數必須大於 0', 'danger');
+    return;
+  }
+
+  const grp = order.group || order.grp || state.group;
+  const sym = order.symbol;
+  const side = order.side;
+  const price = Number(order.price);
+  if (!isValidPricePatch(price)) {
+    toast('委託價格無效，無法調整', 'danger');
+    return;
+  }
+  if (side === 'sell' && getHeldQtyPatch(grp, sym) < qty) {
+    toast('賣出股數不可超過目前持股', 'danger');
+    return;
+  }
+
+  const amount = Math.round(price * qty);
+  const feeRate = Number(order.fee_rate ?? 0.0004);
+  const feeAmount = Math.round(amount * feeRate);
+  const taxRate = side === 'sell' ? Number(order.tax_rate ?? getSellTaxRate(sym, grp)) : 0;
+  const taxAmount = Math.round(amount * taxRate);
+  const settlementAmount = side === 'buy'
+    ? amount + feeAmount + taxAmount
+    : amount - feeAmount - taxAmount;
+  if (side === 'buy' && state.groups?.[grp] && state.groups[grp].cash < settlementAmount) {
+    toast('現金不足，無法調整為這個股數', 'danger');
+    return;
+  }
+
+  const nextComment = (order.comment || '委託待成交') + `；股數由 ${oldQty} 調整為 ${qty}`;
+  const patch = {
+    qty,
+    amount,
+    fee_amount: feeAmount,
+    tax_amount: taxAmount,
+    settlement_amount: settlementAmount,
+    comment: nextComment
+  };
+  const { error } = await db.from('orders').update(patch).eq('id', id);
+  if (error) {
+    toast('調整委託失敗：' + error.message, 'danger');
+    return;
+  }
+  Object.assign(order, patch);
+  rebuildPendingOrderStatePatch();
+  renderPendingList();
+  renderHistory();
+  renderTradeReport();
+  toast('已調整委託股數', 'success');
 }
 
 async function cancelPendingOrderPatch(id) {
@@ -4257,7 +4475,20 @@ const originalUpdateAllMetricsPatch = updateAllMetrics;
 updateAllMetrics = function updateAllMetricsPatched() {
   originalUpdateAllMetricsPatch();
   ensureAdjustmentUI();
+  ensureFullExportButtonUI();
+  renderAdjustmentHistoryPatch();
   renderPendingList();
+};
+
+const originalRebuildPortfolioFromTimelinePatch = rebuildPortfolioFromTimeline;
+rebuildPortfolioFromTimeline = function rebuildPortfolioFromTimelinePatched() {
+  const allEvents = state.portfolioEvents || [];
+  state.portfolioEvents = allEvents.filter(ev => !isVoidedPortfolioEventPatch(ev));
+  try {
+    originalRebuildPortfolioFromTimelinePatch();
+  } finally {
+    state.portfolioEvents = allEvents;
+  }
 };
 
 renderPerformanceReport = function renderPerformanceReportPatched() {
@@ -4367,6 +4598,547 @@ renderTradeReport = function renderTradeReportPatched() {
   list.innerHTML = html;
 };
 
+function csvCellPatch(value) {
+  if (value == null) return '';
+  const text = String(value).replace(/\r?\n/g, ' ');
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function csvSectionPatch(rows, title, header, dataRows) {
+  rows.push([`=== ${title} ===`]);
+  if (header?.length) rows.push(header);
+  for (const r of dataRows || []) rows.push(r);
+  rows.push([]);
+}
+
+function groupMetricsPatch(grp) {
+  const g = state.groups?.[grp] || {};
+  const positions = g.positions || [];
+  const marketValue = positions.reduce((sum, p) => {
+    const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+    return sum + price * Number(p.qty || 0);
+  }, 0);
+  const totalCost = positions.reduce((sum, p) => sum + Number(p.avgPrice || 0) * Number(p.qty || 0), 0);
+  const nav = typeof calcNAV === 'function' ? calcNAV(grp) : Number(g.cash || 0) + marketValue;
+  const realized = Number(g.realizedPnl || 0);
+  const unrealized = marketValue - totalCost;
+  const totalPnl = realized + unrealized;
+  const executedOrders = (state.orders || []).filter(o => (o.group || o.grp) === grp && o.status === 'executed');
+  const feeTotal = executedOrders.reduce((sum, o) => sum + Number(o.fee_amount || 0), 0);
+  const taxTotal = executedOrders.reduce((sum, o) => sum + Number(o.tax_amount || 0), 0);
+  const dividendTotal = (state.portfolioEvents || [])
+    .filter(ev => (ev.group || ev.grp) === grp && ev.event_type === 'cash_dividend')
+    .reduce((sum, ev) => sum + Number(ev.cash_amount || ev.amount || 0), 0);
+  return {
+    groupName: grp === 'etf' ? 'ETF組' : '個股組',
+    nav,
+    cash: Number(g.cash || 0),
+    marketValue,
+    totalCost,
+    realized,
+    unrealized,
+    totalPnl,
+    returnPct: INITIAL ? totalPnl / INITIAL * 100 : 0,
+    tradeCount: executedOrders.length,
+    feeTotal,
+    taxTotal,
+    dividendTotal,
+    maxDD: Number(g.maxDD || 0),
+    sharpe: typeof calcSharpe === 'function' ? calcSharpe(grp) : '',
+    utilizationPct: typeof calcUtil === 'function' ? calcUtil(grp) : (nav ? marketValue / nav * 100 : 0),
+    frozen: g.frozen ? '是' : '否'
+  };
+}
+
+function exportFullReportPatch() {
+  const rows = [];
+  const periodLabel = typeof period !== 'undefined' && period?.start && period?.end
+    ? `${period.start.toLocaleDateString('zh-TW')} ~ ${period.end.toLocaleDateString('zh-TW')}`
+    : '未設定';
+
+  rows.push(['SimTrade 模擬投資平台完整匯出']);
+  rows.push(['匯出時間', new Date().toLocaleString('zh-TW')]);
+  rows.push(['交易期間', periodLabel]);
+  rows.push(['初始資金', INITIAL]);
+  rows.push([]);
+
+  csvSectionPatch(rows, '一、績效摘要', [
+    '組別','期末NAV','現金餘額','持股市值','持股成本','已實現損益','未實現損益','總損益','報酬率%','成交筆數','手續費合計','交易稅合計','現金股利合計','最大回撤%','夏普值','資金使用率%','是否凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.cash, m.marketValue, m.totalCost, m.realized, m.unrealized, m.totalPnl, m.returnPct.toFixed(2), m.tradeCount, m.feeTotal, m.taxTotal, m.dividendTotal, m.maxDD.toFixed(2), m.sharpe ?? '', m.utilizationPct, m.frozen];
+  }));
+
+  const executed = (state.orders || [])
+    .filter(o => o.status === 'executed')
+    .sort((a, b) => `${a.settlement_date || ''} ${a.time || ''}`.localeCompare(`${b.settlement_date || ''} ${b.time || ''}`));
+  csvSectionPatch(rows, '二、成交明細', [
+    '成交日期','時間','組別','買賣','商品代號','商品名稱','股數','成交價','委託價','成交金額','手續費','交易稅','交割金額','備註'
+  ], executed.map(o => [
+    o.settlement_date || '', o.time || '', (o.group || o.grp) === 'etf' ? 'ETF組' : '個股組',
+    o.side === 'buy' ? '買入' : '賣出', normalizeCleanSymbolPatch(o.symbol), o.name || '',
+    o.qty || 0, o.settlement_price ?? o.price ?? '', o.price ?? '', o.amount || 0,
+    o.fee_amount || 0, o.tax_amount || 0, o.settlement_amount || 0, o.comment || ''
+  ]));
+
+  const notExecuted = (state.orders || [])
+    .filter(o => o.status !== 'executed')
+    .sort((a, b) => `${a.settlement_date || ''} ${a.time || ''}`.localeCompare(`${b.settlement_date || ''} ${b.time || ''}`));
+  csvSectionPatch(rows, '三、委託與未成交紀錄', [
+    '委託日期','時間','組別','狀態','買賣','商品代號','商品名稱','股數','委託價','委託金額','手續費','交易稅','預估交割金額','原因/備註'
+  ], notExecuted.map(o => [
+    o.settlement_date || '', o.time || '', (o.group || o.grp) === 'etf' ? 'ETF組' : '個股組',
+    o.status || '', o.side === 'buy' ? '買入' : '賣出', normalizeCleanSymbolPatch(o.symbol), o.name || '',
+    o.qty || 0, o.price ?? '', o.amount || 0, o.fee_amount || 0, o.tax_amount || 0, o.settlement_amount || 0, o.comment || ''
+  ]));
+
+  const positionRows = [];
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      const unrealized = marketValue - cost;
+      positionRows.push([
+        grp === 'etf' ? 'ETF組' : '個股組',
+        normalizeCleanSymbolPatch(p.symbol),
+        state.securities?.[p.symbol]?.name || p.name || '',
+        p.qty || 0,
+        p.avgPrice || 0,
+        price,
+        marketValue,
+        cost,
+        unrealized,
+        cost ? (unrealized / cost * 100).toFixed(2) : '0.00',
+        nav ? (marketValue / nav * 100).toFixed(2) : '0.00'
+      ]);
+    }
+  }
+  csvSectionPatch(rows, '四、期末持股快照', [
+    '組別','商品代號','商品名稱','股數','平均成本','目前報價','市值','成本','未實現損益','未實現報酬率%','佔NAV比重%'
+  ], positionRows);
+
+  csvSectionPatch(rows, '五、風控摘要', [
+    '組別','NAV','最大回撤%','資金使用率%','持股成本','是否凍結'
+  ], ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    return [m.groupName, m.nav, m.maxDD.toFixed(2), m.utilizationPct, m.totalCost, m.frozen];
+  }));
+
+  csvSectionPatch(rows, '六、除權息與人工調整', [
+    '日期','組別','商品代號','事件類型','現金金額','股數增減','備註'
+  ], (state.portfolioEvents || []).map(ev => [
+    ev.event_date || ev.date || '',
+    (ev.group || ev.grp) === 'etf' ? 'ETF組' : '個股組',
+    normalizeCleanSymbolPatch(ev.symbol || ''),
+    ev.event_type || '',
+    ev.cash_amount ?? ev.amount ?? '',
+    ev.share_delta ?? ev.qty_delta ?? '',
+    ev.note || ev.comment || ''
+  ]));
+
+  csvSectionPatch(rows, '七、報價快照', [
+    '商品代號','商品名稱','報價','昨收/基準價','漲跌幅%','報價時間','報價是否有效'
+  ], Object.entries(state.securities || {}).map(([sym, s]) => [
+    normalizeCleanSymbolPatch(sym),
+    s.name || '',
+    s.price ?? '',
+    s.base ?? '',
+    s.changeRate ?? '',
+    s.quote_time || s.quoteTime || s.price_time || s.updated_at || '',
+    isValidPricePatch(s.price) ? '是' : '否'
+  ]));
+
+  const csv = '\uFEFF' + rows.map(r => (Array.isArray(r) ? r.map(csvCellPatch).join(',') : csvCellPatch(r))).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'SimTrade_full_report_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('完整 CSV 已匯出', 'success');
+}
+
+function ensureFullExportButtonUI() {
+  document.querySelectorAll('button[onclick="exportReport()"],button[onclick="exportRiskReport()"]').forEach(btn => {
+    btn.textContent = '匯出完整資料 CSV';
+  });
+  const hint = qs('export-hint');
+  if (hint) hint.textContent = '匯出內容包含績效摘要、成交明細、委託紀錄、期末持股、風控摘要、除權息/人工調整與報價快照';
+}
+
+exportReport = exportFullReportPatch;
+exportRiskReport = exportFullReportPatch;
+
+function normalizeNavPointsPatch(grp) {
+  const raw = state.groups?.[grp]?.navHistory || [];
+  const points = (typeof normalizeNavHistoryPoints === 'function' ? normalizeNavHistoryPoints(raw) : raw)
+    .map(p => ({
+      date: p.date || (p.t ? new Date(Number(p.t)).toISOString().slice(0, 10) : ''),
+      nav: Number(p.nav)
+    }))
+    .filter(p => p.date && Number.isFinite(p.nav) && p.nav > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const byDate = new Map();
+  for (const p of points) byDate.set(p.date, p.nav);
+  return [...byDate.entries()].map(([date, nav]) => ({ date, nav }));
+}
+
+function dailyReturnRowsPatch() {
+  const etf = normalizeNavPointsPatch('etf');
+  const stock = normalizeNavPointsPatch('stock');
+  const etfMap = new Map(etf.map((p, i) => [p.date, { ...p, prev: etf[i - 1]?.nav }]));
+  const stockMap = new Map(stock.map((p, i) => [p.date, { ...p, prev: stock[i - 1]?.nav }]));
+  const dates = [...new Set([...etfMap.keys(), ...stockMap.keys()])].sort();
+  return dates.map(date => {
+    const e = etfMap.get(date);
+    const s = stockMap.get(date);
+    const er = e?.prev ? e.nav / e.prev - 1 : '';
+    const sr = s?.prev ? s.nav / s.prev - 1 : '';
+    return [
+      date,
+      e?.nav ?? '',
+      s?.nav ?? '',
+      er === '' ? '' : er,
+      sr === '' ? '' : sr,
+      e?.nav ? e.nav / INITIAL - 1 : '',
+      s?.nav ? s.nav / INITIAL - 1 : ''
+    ];
+  });
+}
+
+function riskDailyRowsPatch() {
+  const rows = [];
+  for (const grp of ['etf', 'stock']) {
+    const points = normalizeNavPointsPatch(grp);
+    let peak = 0;
+    let maxDD = 0;
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      peak = Math.max(peak, p.nav);
+      const dailyReturn = i > 0 ? p.nav / points[i - 1].nav - 1 : '';
+      const drawdown = peak > 0 ? p.nav / peak - 1 : 0;
+      maxDD = Math.min(maxDD, drawdown);
+      rows.push([
+        p.date,
+        grp === 'etf' ? 'ETF組' : '個股組',
+        p.nav,
+        dailyReturn,
+        p.nav / INITIAL - 1,
+        drawdown,
+        maxDD,
+        '',
+        '',
+        '',
+        '',
+        ''
+      ]);
+    }
+  }
+  return rows;
+}
+
+function holdingPeriodStatsPatch(grp) {
+  const lots = {};
+  const closedDays = [];
+  const orders = (state.orders || [])
+    .filter(o => o.status === 'executed' && (o.group || o.grp) === grp)
+    .sort((a, b) => `${a.settlement_date || ''} ${a.time || ''}`.localeCompare(`${b.settlement_date || ''} ${b.time || ''}`));
+  for (const o of orders) {
+    const sym = o.symbol;
+    const date = o.settlement_date || new Date().toISOString().slice(0, 10);
+    if (!lots[sym]) lots[sym] = [];
+    if (o.side === 'buy') {
+      lots[sym].push({ qty: Number(o.qty || 0), date });
+    } else {
+      let remain = Number(o.qty || 0);
+      while (remain > 0 && lots[sym].length) {
+        const lot = lots[sym][0];
+        const used = Math.min(remain, lot.qty);
+        const days = Math.max(0, Math.round((new Date(date) - new Date(lot.date)) / 86400000));
+        closedDays.push(days);
+        lot.qty -= used;
+        remain -= used;
+        if (lot.qty <= 0) lots[sym].shift();
+      }
+    }
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const openDays = Object.values(lots).flat().filter(l => l.qty > 0).map(l => Math.max(0, Math.round((new Date(today) - new Date(l.date)) / 86400000)));
+  const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : '';
+  return {
+    averageClosedHoldingDays: avg(closedDays),
+    averageOpenHoldingDays: avg(openDays)
+  };
+}
+
+function behaviorMetricsPatch(grp) {
+  const orders = (state.orders || []).filter(o => o.status === 'executed' && (o.group || o.grp) === grp);
+  const buys = orders.filter(o => o.side === 'buy');
+  const sells = orders.filter(o => o.side === 'sell');
+  const profits = sells.map(o => Number(o.settlement_amount || o.amount || 0) - Number(o.amount || 0)).filter(x => x > 0);
+  const losses = sells.map(o => Number(o.settlement_amount || o.amount || 0) - Number(o.amount || 0)).filter(x => x < 0);
+  const holding = holdingPeriodStatsPatch(grp);
+  const dateCount = Math.max(1, new Set(orders.map(o => o.settlement_date).filter(Boolean)).size);
+  const totalBuyAmount = buys.reduce((sum, o) => sum + Number(o.amount || 0), 0);
+  return {
+    tradeCount: orders.length,
+    buyCount: buys.length,
+    sellCount: sells.length,
+    buySellRatio: sells.length ? buys.length / sells.length : '',
+    tradeFrequencyPerDay: orders.length / dateCount,
+    turnoverRate: INITIAL ? totalBuyAmount / INITIAL : '',
+    averageClosedHoldingDays: holding.averageClosedHoldingDays,
+    averageOpenHoldingDays: holding.averageOpenHoldingDays,
+    winRate: sells.length ? profits.length / sells.length : '',
+    profitFactor: Math.abs(losses.reduce((a, b) => a + b, 0)) ? profits.reduce((a, b) => a + b, 0) / Math.abs(losses.reduce((a, b) => a + b, 0)) : '',
+    averageWin: profits.length ? profits.reduce((a, b) => a + b, 0) / profits.length : '',
+    averageLoss: losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : '',
+    largestSingleTradeAmount: orders.reduce((max, o) => Math.max(max, Number(o.amount || 0)), 0)
+  };
+}
+
+function summaryRowsPatch() {
+  return ['etf', 'stock'].map(grp => {
+    const m = groupMetricsPatch(grp);
+    const b = behaviorMetricsPatch(grp);
+    return [
+      m.groupName,
+      m.nav,
+      m.totalPnl,
+      m.returnPct / 100,
+      m.maxDD / 100,
+      m.sharpe ?? '',
+      Number(m.utilizationPct || 0) / 100,
+      m.tradeCount,
+      m.feeTotal,
+      m.taxTotal,
+      m.dividendTotal,
+      b.averageClosedHoldingDays,
+      b.averageOpenHoldingDays,
+      b.turnoverRate,
+      b.winRate
+    ];
+  });
+}
+
+function groupLabelPatch(grp) {
+  return grp === 'etf' ? 'ETF組' : '個股組';
+}
+
+function sideLabelPatch(side) {
+  return side === 'buy' ? '買入' : '賣出';
+}
+
+function statusLabelPatch(status) {
+  if (status === 'executed') return '已成交';
+  if (status === 'pending' || status === 'approved') return '待成交';
+  if (status === 'rejected' || status === 'cancelled') return '已取消';
+  return status || '';
+}
+
+function pctTextPatch(value) {
+  if (value === '' || value == null || !Number.isFinite(Number(value))) return '—';
+  return (Number(value) * 100).toFixed(2) + '%';
+}
+
+function symbolFullPatch(sym) {
+  return String(sym || '').toUpperCase();
+}
+
+function exportSheetsPatch() {
+  const otherOrders = (state.orders || []).filter(o => o.status !== 'executed');
+  const positionRows = [];
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups?.[grp] || {};
+    const nav = typeof calcNAV === 'function' ? calcNAV(grp) : 0;
+    for (const p of g.positions || []) {
+      const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+      const marketValue = price * Number(p.qty || 0);
+      const cost = Number(p.avgPrice || 0) * Number(p.qty || 0);
+      positionRows.push([
+        groupLabelPatch(grp), symbolFullPatch(p.symbol), state.securities?.[p.symbol]?.name || p.name || '',
+        p.qty || 0, p.avgPrice || 0, price, Math.round(marketValue), Math.round(cost),
+        Math.round(marketValue - cost), cost ? pctTextPatch((marketValue - cost) / cost) : '—',
+        nav ? pctTextPatch(marketValue / nav) : '—'
+      ]);
+    }
+  }
+
+  return {
+    full: { filename: 'SimTrade_完整分析報告', title: 'SimTrade 完整分析報告', rows: [] },
+    daily: {
+      filename: 'SimTrade_統計檢定每日報酬',
+      title: '一、統計檢定每日報酬',
+      rows: [
+        ['日期','ETF組 NAV','個股組 NAV','ETF組日報酬率','個股組日報酬率','ETF組累積報酬率','個股組累積報酬率'],
+        ...dailyReturnRowsPatch().map(r => [r[0], r[1], r[2], pctTextPatch(r[3]), pctTextPatch(r[4]), pctTextPatch(r[5]), pctTextPatch(r[6])])
+      ]
+    },
+    risk: {
+      filename: 'SimTrade_每日風險資料',
+      title: '二、每日風險資料',
+      rows: [
+        ['日期','組別','NAV','日報酬率','累積報酬率','當日回撤','截至當日最大回撤','現金','持股市值','現金比率','資金使用率','最大單一持股比重'],
+        ...riskDailyRowsPatch().map(r => [r[0], r[1], r[2], pctTextPatch(r[3]), pctTextPatch(r[4]), pctTextPatch(r[5]), pctTextPatch(r[6]), r[7], r[8], r[9], r[10], r[11]])
+      ]
+    },
+    summary: {
+      filename: 'SimTrade_績效摘要',
+      title: '三、績效摘要',
+      rows: [
+        ['組別','期末NAV','累計損益','累計報酬率','最大回撤','夏普值','資金使用率','成交筆數','手續費合計','交易稅合計','現金股利合計','平均已實現持有天數','平均未實現持有天數','週轉率','勝率'],
+        ...summaryRowsPatch().map(r => [r[0], r[1], r[2], pctTextPatch(r[3]), pctTextPatch(r[4]), r[5] ?? '—', pctTextPatch(r[6]), r[7], r[8], r[9], r[10], r[11] === '' ? '—' : Number(r[11]).toFixed(1), r[12] === '' ? '—' : Number(r[12]).toFixed(1), pctTextPatch(r[13]), pctTextPatch(r[14])])
+      ]
+    },
+    trades: {
+      filename: 'SimTrade_所有下單紀錄',
+      title: '四、所有下單紀錄',
+      rows: [
+        ['組別','下單時間','結算日期','商品代號','商品名稱','方向','數量(股)','成交價/委託價','總金額','狀態','備註'],
+        ...(state.orders || []).map(o => [
+          groupLabelPatch(getOrderGroupPatch(o)), o.time || '', o.settlement_date || '',
+          symbolFullPatch(o.symbol), o.name || '', sideLabelPatch(o.side), o.qty || 0,
+          o.settlement_price ?? o.price ?? '', o.amount || 0, statusLabelPatch(o.status), o.comment || ''
+        ])
+      ]
+    },
+    orders: {
+      filename: 'SimTrade_委託訂單',
+      title: '五、委託訂單',
+      rows: [
+        ['組別','委託時間','委託日期','商品代號','商品名稱','方向','數量(股)','委託價','委託金額','狀態','備註'],
+        ...otherOrders.map(o => [groupLabelPatch(getOrderGroupPatch(o)), o.time || '', o.settlement_date || '', symbolFullPatch(o.symbol), o.name || '', sideLabelPatch(o.side), o.qty || 0, o.price ?? '', o.amount || 0, statusLabelPatch(o.status), o.comment || ''])
+      ]
+    },
+    positions: {
+      filename: 'SimTrade_期末持股',
+      title: '六、期末持股',
+      rows: [
+        ['組別','商品代號','商品名稱','股數','平均成本','目前報價','市值','成本','未實現損益','未實現報酬率','佔NAV比重'],
+        ...positionRows
+      ]
+    },
+    adjustments: {
+      filename: 'SimTrade_除權息與人工調整',
+      title: '七、除權息與人工調整',
+      rows: [
+        ['事件ID','日期','組別','商品代號','事件類型','狀態','現金金額','股數增減','建立時間'],
+        ...(state.portfolioEvents || []).map(ev => [ev.id || '', ev.event_date || ev.date || '', groupLabelPatch(ev.group || ev.grp), symbolFullPatch(ev.symbol), String(ev.event_type || '').replace('voided_', ''), isVoidedPortfolioEventPatch(ev) ? '已退回' : '有效', ev.cash_amount ?? ev.amount ?? '', ev.share_delta ?? ev.qty_delta ?? '', ev.created_at || ''])
+      ]
+    },
+    quotes: {
+      filename: 'SimTrade_報價快照',
+      title: '八、報價快照',
+      rows: [
+        ['商品代號','商品名稱','目前報價','昨收/基準價','漲跌幅','報價時間','報價是否有效'],
+        ...Object.entries(state.securities || {}).map(([sym, s]) => [symbolFullPatch(sym), s.name || '', s.price ?? '', s.base ?? '', pctTextPatch(Number(s.changeRate || 0) / 100), s.quote_time || s.quoteTime || s.price_time || s.updated_at || '', isValidPricePatch(s.price) ? '是' : '否'])
+      ]
+    },
+    behavior: {
+      filename: 'SimTrade_交易行為分析',
+      title: '九、交易行為分析',
+      rows: [
+        ['組別','成交筆數','買入筆數','賣出筆數','買賣筆數比','每日平均交易筆數','週轉率','平均已實現持有天數','平均未實現持有天數','勝率','獲利因子','平均獲利','平均虧損','最大單筆交易金額'],
+        ...['etf', 'stock'].map(grp => {
+          const b = behaviorMetricsPatch(grp);
+          return [groupLabelPatch(grp), b.tradeCount, b.buyCount, b.sellCount, b.buySellRatio === '' ? '—' : Number(b.buySellRatio).toFixed(2), Number(b.tradeFrequencyPerDay).toFixed(2), pctTextPatch(b.turnoverRate), b.averageClosedHoldingDays === '' ? '—' : Number(b.averageClosedHoldingDays).toFixed(1), b.averageOpenHoldingDays === '' ? '—' : Number(b.averageOpenHoldingDays).toFixed(1), pctTextPatch(b.winRate), b.profitFactor === '' ? '—' : Number(b.profitFactor).toFixed(2), b.averageWin === '' ? '—' : Math.round(b.averageWin), b.averageLoss === '' ? '—' : Math.round(b.averageLoss), Math.round(b.largestSingleTradeAmount)];
+        })
+      ]
+    }
+  };
+}
+
+function downloadRowsCsvPatch(filename, title, rows) {
+  const out = [[`=== ${title} ===`], ['報告產出時間', new Date().toLocaleString('zh-TW')], [], ...rows];
+  const csv = '\uFEFF' + out.map(r => r.map(csvCellPatch).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${filename}_${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportSelectedCsvPatch() {
+  const key = qs('export-sheet-select')?.value || 'full';
+  const sheets = exportSheetsPatch();
+  if (key === 'full') {
+    const rows = [['=== SimTrade 完整分析報告 ==='], ['報告產出時間', new Date().toLocaleString('zh-TW')], []];
+    Object.entries(sheets).filter(([k]) => k !== 'full').forEach(([, sheet]) => {
+      rows.push([`=== ${sheet.title} ===`], ...sheet.rows, []);
+    });
+    const csv = '\uFEFF' + rows.map(r => r.map(csvCellPatch).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'SimTrade_完整分析報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('完整 CSV 已匯出', 'success');
+    return;
+  }
+  const sheet = sheets[key];
+  if (!sheet) return;
+  downloadRowsCsvPatch(sheet.filename, sheet.title, sheet.rows);
+  toast('CSV 已匯出', 'success');
+}
+
+function exportAllCsvPatch() {
+  const sheets = exportSheetsPatch();
+  Object.entries(sheets).filter(([k]) => k !== 'full').forEach(([, sheet], idx) => {
+    setTimeout(() => downloadRowsCsvPatch(sheet.filename, sheet.title, sheet.rows), idx * 250);
+  });
+  toast('已開始下載多個 CSV 檔', 'success');
+}
+
+function ensureCsvExportUI() {
+  const exportArea = qs('export-area');
+  if (!exportArea || document.getElementById('export-sheet-select')) return;
+  const panel = document.createElement('div');
+  panel.style.margin = '8px 0';
+  panel.innerHTML = `
+    <select id="export-sheet-select" style="margin-bottom:8px">
+      <option value="full">完整分析報告</option>
+      <option value="daily">統計檢定每日報酬</option>
+      <option value="risk">每日風險資料</option>
+      <option value="summary">績效摘要</option>
+      <option value="trades">所有下單紀錄</option>
+      <option value="orders">委託訂單</option>
+      <option value="positions">期末持股</option>
+      <option value="adjustments">除權息與人工調整</option>
+      <option value="quotes">報價快照</option>
+      <option value="behavior">交易行為分析</option>
+    </select>
+    <button class="btn btn-full btn-primary" style="margin-bottom:8px" onclick="exportSelectedCsvPatch()">匯出所選 CSV</button>
+    <button class="btn btn-full btn-stk" style="margin-bottom:8px" onclick="exportAllCsvPatch()">全部分開匯出 CSV</button>
+  `;
+  exportArea.insertBefore(panel, exportArea.firstChild);
+  document.querySelectorAll('button[onclick="exportReport()"],button[onclick="exportRiskReport()"]')
+    .forEach(btn => { btn.textContent = '匯出完整分析報告 CSV'; });
+  const hint = qs('export-hint');
+  if (hint) hint.textContent = '可選擇單一資料表匯出，也可將各資料表分開下載為多個 CSV 檔';
+}
+
+const previousUpdateAllMetricsForCsvPatch = updateAllMetrics;
+updateAllMetrics = function updateAllMetricsCsvPatched() {
+  previousUpdateAllMetricsForCsvPatch();
+  ensureCsvExportUI();
+};
+
+exportReport = exportSelectedCsvPatch;
+exportRiskReport = exportSelectedCsvPatch;
+
+const originalSetGroupPatch = setGroup;
+setGroup = function setGroupPatched(grp) {
+  originalSetGroupPatch(grp);
+  renderPendingList();
+};
 // ===== SimTrade minimal patch END =====
 init();
 </script>
