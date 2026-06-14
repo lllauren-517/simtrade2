@@ -4778,7 +4778,12 @@ function normalizeNavPointsPatch(grp) {
   const points = (typeof normalizeNavHistoryPoints === 'function' ? normalizeNavHistoryPoints(raw) : raw)
     .map(p => ({
       date: p.date || (p.t ? new Date(Number(p.t)).toISOString().slice(0, 10) : ''),
-      nav: Number(p.nav)
+      nav: Number(p.nav),
+      cash: p.cash,
+      marketValue: p.marketValue,
+      cashRatio: p.cashRatio,
+      marketExposureRatio: p.marketExposureRatio,
+      largestPositionWeight: p.largestPositionWeight
     }))
     .filter(p => p.date && Number.isFinite(p.nav) && p.nav > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
@@ -4814,14 +4819,21 @@ function riskDailyRowsPatch() {
   const rows = [];
   for (const grp of ['etf', 'stock']) {
     const points = normalizeNavPointsPatch(grp);
+    const fallbackByDate = buildHistoricalRiskFallbackPatch(grp, points.map(p => p.date));
     let peak = 0;
     let maxDD = 0;
     for (let i = 0; i < points.length; i++) {
       const p = points[i];
+      const fallback = fallbackByDate.get(p.date) || {};
       peak = Math.max(peak, p.nav);
       const dailyReturn = i > 0 ? p.nav / points[i - 1].nav - 1 : '';
       const drawdown = peak > 0 ? p.nav / peak - 1 : 0;
       maxDD = Math.min(maxDD, drawdown);
+      const cash = p.cash ?? fallback.cash ?? '';
+      const marketValue = p.marketValue ?? fallback.marketValue ?? '';
+      const cashRatio = p.cashRatio ?? fallback.cashRatio ?? '';
+      const marketExposureRatio = p.marketExposureRatio ?? fallback.marketExposureRatio ?? '';
+      const largestPositionWeight = p.largestPositionWeight ?? fallback.largestPositionWeight ?? '';
       rows.push([
         p.date,
         grp === 'etf' ? 'ETF組' : '個股組',
@@ -4830,16 +4842,132 @@ function riskDailyRowsPatch() {
         p.nav / INITIAL - 1,
         drawdown,
         maxDD,
-        '',
-        '',
-        '',
-        '',
-        ''
+        cash,
+        marketValue,
+        cashRatio,
+        marketExposureRatio,
+        largestPositionWeight
       ]);
     }
   }
   return rows;
 }
+
+function buildHistoricalRiskFallbackPatch(grp, dates) {
+  const out = new Map();
+  const wanted = [...new Set(dates || [])].filter(Boolean).sort();
+  if (!wanted.length) return out;
+  const lots = [];
+  let cash = INITIAL;
+  const orders = (state.orders || [])
+    .filter(o => o.status === 'executed' && getOrderGroupPatch(o) === grp)
+    .sort((a, b) => `${a.settlement_date || ''} ${a.time || ''}`.localeCompare(`${b.settlement_date || ''} ${b.time || ''}`));
+  const events = (state.portfolioEvents || [])
+    .filter(ev => !isVoidedPortfolioEventPatch(ev) && (ev.group || ev.grp) === grp)
+    .map(ev => ({ ...ev, settlement_date: ev.event_date || ev.date || '', time: '08:59:59', kind: 'event' }));
+  const timeline = [
+    ...orders.map(o => ({ ...o, kind: 'order' })),
+    ...events
+  ].sort((a, b) => `${a.settlement_date || ''} ${a.time || ''}`.localeCompare(`${b.settlement_date || ''} ${b.time || ''}`));
+  let idx = 0;
+  const applyOrder = o => {
+    const qty = Number(o.qty || 0);
+    const price = Number(o.settlement_price ?? o.price ?? 0);
+    const fee = Number(o.fee_amount || 0);
+    const tax = Number(o.tax_amount || 0);
+    const amount = Number(o.amount || price * qty);
+    if (o.side === 'buy') {
+      cash -= amount + fee + tax;
+      lots.push({ symbol: o.symbol, qty, cost: amount + fee + tax });
+      return;
+    }
+    cash += amount - fee - tax;
+    let remain = qty;
+    for (const lot of lots.filter(l => l.symbol === o.symbol)) {
+      if (remain <= 0) break;
+      const used = Math.min(remain, lot.qty);
+      const ratio = lot.qty > 0 ? used / lot.qty : 0;
+      lot.cost -= lot.cost * ratio;
+      lot.qty -= used;
+      remain -= used;
+    }
+  };
+  const applyEvent = ev => {
+    if (ev.event_type === 'cash_dividend') cash += Number(ev.cash_amount || ev.amount || 0);
+    if (ev.event_type === 'stock_dividend') {
+      const addQty = Number(ev.share_delta || ev.qty_delta || 0);
+      if (addQty > 0) lots.push({ symbol: ev.symbol, qty: addQty, cost: 0 });
+    }
+  };
+  const snapshot = () => {
+    const marketValue = lots.reduce((sum, lot) => {
+      if (lot.qty <= 0) return sum;
+      const px = getSecurityPricePatch(lot.symbol) ?? (lot.qty ? lot.cost / lot.qty : 0);
+      return sum + px * lot.qty;
+    }, 0);
+    const largest = lots.reduce((max, lot) => {
+      if (lot.qty <= 0) return max;
+      const px = getSecurityPricePatch(lot.symbol) ?? (lot.qty ? lot.cost / lot.qty : 0);
+      return Math.max(max, px * lot.qty);
+    }, 0);
+    const nav = cash + marketValue;
+    return {
+      cash: Math.round(cash),
+      marketValue: Math.round(marketValue),
+      cashRatio: nav > 0 ? cash / nav : '',
+      marketExposureRatio: nav > 0 ? marketValue / nav : '',
+      largestPositionWeight: nav > 0 ? largest / nav : ''
+    };
+  };
+  for (const date of wanted) {
+    while (idx < timeline.length && (timeline[idx].settlement_date || '') <= date) {
+      if (timeline[idx].kind === 'event') applyEvent(timeline[idx]);
+      else applyOrder(timeline[idx]);
+      idx += 1;
+    }
+    out.set(date, snapshot());
+  }
+  return out;
+}
+
+function calcRiskSnapshotPatch(grp) {
+  const g = state.groups?.[grp];
+  if (!g) return {};
+  const positions = g.positions || [];
+  const marketValue = positions.reduce((sum, p) => {
+    const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+    return sum + price * Number(p.qty || 0);
+  }, 0);
+  const nav = typeof calcNAV === 'function' ? calcNAV(grp) : Number(g.cash || 0) + marketValue;
+  const largestPositionValue = positions.reduce((max, p) => {
+    const price = getSecurityPricePatch(p.symbol) ?? Number(p.avgPrice || 0);
+    return Math.max(max, price * Number(p.qty || 0));
+  }, 0);
+  return {
+    cash: Math.round(Number(g.cash || 0)),
+    marketValue: Math.round(marketValue),
+    cashRatio: nav > 0 ? Number(g.cash || 0) / nav : '',
+    marketExposureRatio: nav > 0 ? marketValue / nav : '',
+    largestPositionWeight: nav > 0 ? largestPositionValue / nav : ''
+  };
+}
+
+function attachRiskSnapshotToNavPointPatch(grp, ts = Date.now()) {
+  const g = state.groups?.[grp];
+  if (!g || !Array.isArray(g.navHistory)) return;
+  const dayKey = typeof fmtNavDayKey === 'function'
+    ? fmtNavDayKey(ts)
+    : new Date(ts).toISOString().slice(0, 10);
+  const idx = g.navHistory.findIndex(h => (h?.dayKey || (h?.t ? new Date(Number(h.t)).toISOString().slice(0, 10) : '')) === dayKey);
+  if (idx < 0) return;
+  g.navHistory[idx] = { ...g.navHistory[idx], ...calcRiskSnapshotPatch(grp) };
+}
+
+const originalRecordLiveNavHistoryPatch = recordLiveNavHistory;
+recordLiveNavHistory = function recordLiveNavHistoryWithRiskPatch() {
+  originalRecordLiveNavHistoryPatch();
+  for (const grp of ['etf', 'stock']) attachRiskSnapshotToNavPointPatch(grp, Date.now());
+};
 
 function holdingPeriodStatsPatch(grp) {
   const lots = {};
@@ -4950,6 +5078,7 @@ function symbolFullPatch(sym) {
 }
 
 function exportSheetsPatch() {
+  recordLiveNavHistory();
   const otherOrders = (state.orders || []).filter(o => o.status !== 'executed');
   const positionRows = [];
   for (const grp of ['etf', 'stock']) {
@@ -4983,7 +5112,7 @@ function exportSheetsPatch() {
       title: '二、每日風險資料',
       rows: [
         ['日期','組別','NAV','日報酬率','累積報酬率','當日回撤','截至當日最大回撤','現金','持股市值','現金比率','資金使用率','最大單一持股比重'],
-        ...riskDailyRowsPatch().map(r => [r[0], r[1], r[2], pctTextPatch(r[3]), pctTextPatch(r[4]), pctTextPatch(r[5]), pctTextPatch(r[6]), r[7], r[8], r[9], r[10], r[11]])
+        ...riskDailyRowsPatch().map(r => [r[0], r[1], r[2], pctTextPatch(r[3]), pctTextPatch(r[4]), pctTextPatch(r[5]), pctTextPatch(r[6]), r[7], r[8], pctTextPatch(r[9]), pctTextPatch(r[10]), pctTextPatch(r[11])])
       ]
     },
     summary: {
@@ -5139,6 +5268,7 @@ setGroup = function setGroupPatched(grp) {
   originalSetGroupPatch(grp);
   renderPendingList();
 };
+
 // ===== SimTrade minimal patch END =====
 init();
 </script>
