@@ -769,7 +769,17 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
               </div>
             </div>
           </div>
-        </div>
+
+          <div class="card">
+            <div class="card-header"><span class="card-title">報表匯出</span></div>
+            <div class="card-body">
+              <p style="font-size:13px;color:var(--text);margin-bottom:14px;line-height:1.5">
+                匯出包含兩組指標（夏普值、最大回撤、資金使用率）及所有下單詳細紀錄的 CSV 報表。
+              </p>
+              <button class="btn btn-full btn-primary" onclick="exportRiskReport()">📄 匯出中後台報告 CSV</button>
+            </div>
+          </div>
+          </div>
 
       </div> 
 
@@ -3401,6 +3411,80 @@ function exportReport() {
   toast('CSV 已匯出', 'success');
 }
 
+// ========== 匯出中後台報告 ==========
+function exportRiskReport() {
+  const rows = [];
+  
+  rows.push(['=== SimTrade 中後台風控與交易報告 ===']);
+  rows.push(['報告產出時間', new Date().toLocaleString('zh-TW')]);
+  rows.push([]);
+
+  // 1. 風險與資金指標
+  rows.push(['=== 一、風險與資金指標摘要 ===']);
+  rows.push(['組別', '夏普值', '最大回撤', '資金使用率']);
+  for (const grp of ['etf', 'stock']) {
+    const g = state.groups[grp];
+    const sharpe = calcSharpe(grp) || '—';
+    const dd = (g.maxDD || 0).toFixed(2) + '%';
+    const util = calcUtil(grp) + '%';
+    rows.push([g.name, sharpe, dd, util]);
+  }
+  rows.push([]);
+
+  // 2. 所有下單紀錄
+  rows.push(['=== 二、所有下單紀錄 ===']);
+  rows.push(['組別', '下單時間', '結算日期', '商品代號', '商品名稱', '方向', '數量(股)', '成交價/委託價', '總金額', '狀態', '備註']);
+  
+  // 依照結算日期與時間降冪排序（最新的在最上面）
+  const sortedOrders = [...state.orders].sort((a, b) => {
+    const timeA = `${a.settlement_date || ''} ${a.time || ''}`;
+    const timeB = `${b.settlement_date || ''} ${b.time || ''}`;
+    return timeB.localeCompare(timeA); 
+  });
+
+  for (const o of sortedOrders) {
+    const grpName = o.group === 'etf' ? 'ETF組' : '個股組';
+    const side = o.side === 'buy' ? '買入' : '賣出';
+    // 若已成交則顯示結算價，否則顯示委託價
+    const price = o.settlement_price || o.price || 0;
+    const statusMap = {
+      pending: '待成交', 
+      approved: '待結算', 
+      executed: '已成交', 
+      rejected: '已取消'
+    };
+    const statusStr = statusMap[o.status] || o.status;
+    
+    rows.push([
+      grpName,
+      o.time || '—',
+      o.settlement_date || '—',
+      o.symbol,
+      o.name || '',
+      side,
+      o.qty,
+      price,
+      Math.round(o.amount || 0),
+      statusStr,
+      o.comment || ''
+    ]);
+  }
+  
+  if (!sortedOrders.length) rows.push(['（目前無下單紀錄）']);
+
+  // 產生 CSV 並觸發下載 (加入 \uFEFF 確保 Excel 讀取 UTF-8 中文不亂碼)
+  const csv = '\uFEFF' + rows.map(r => Array.isArray(r) ? r.join(',') : r).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'SimTrade_中後台報告_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  
+  toast('中後台報告 CSV 已匯出', 'success');
+}
+
 // ========== LOAD ORDERS FROM DB ==========
 function replayOrder(order) {
   normalizeOrderFinancials(order);
@@ -4287,7 +4371,6 @@ renderTradeReport = function renderTradeReportPatched() {
 init();
 </script>
 
-<!-- 下單雙重確認 Modal -->
 <div class="modal-bg" id="modal-order-confirm">
   <div class="modal">
     <div class="modal-handle"></div>
