@@ -3605,6 +3605,685 @@ async function init() {
   setInterval(() => triggerPriceUpdate(false), 30000);
 }
 
+
+// ===== SimTrade minimal patch START =====
+// SimTrade minimal patch
+// Insert this block inside index.html after the original functions are defined,
+// preferably immediately before the final `init();` call.
+
+function isValidPricePatch(price) {
+  return Number.isFinite(+price) && +price > 0;
+}
+
+function getSecurityPricePatch(sym) {
+  const s = state.securities?.[sym];
+  return isValidPricePatch(s?.price) ? +s.price : null;
+}
+
+function getHeldQtyPatch(grp, sym) {
+  const p = state.groups?.[grp]?.positions?.find(x => x.symbol === sym);
+  return +(p?.qty || 0);
+}
+
+function isTradingDayPatch(d = getTWNTime()) {
+  const day = d.getDay();
+  return day !== 0 && day !== 6;
+}
+
+function isMarketOpenPatch(d = getTWNTime()) {
+  if (!isTradingDayPatch(d)) return false;
+  const mins = d.getHours() * 60 + d.getMinutes();
+  return mins >= 9 * 60 && mins < 13 * 60 + 30;
+}
+
+function getNextMarketOpenDatePatch(baseDate = getTWNTime()) {
+  const d = new Date(baseDate);
+  const mins = d.getHours() * 60 + d.getMinutes();
+  if (isTradingDayPatch(d) && mins < 9 * 60) return d.toISOString().slice(0, 10);
+  return nextTradingDay(d);
+}
+
+function getMarketMinutesPatch(d = getTWNTime()) {
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+function normalizeQuoteTimePatch(raw) {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'number' || /^\d+$/.test(String(raw))) {
+    const n = Number(raw);
+    return new Date(n > 10_000_000_000 ? n : n * 1000);
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function getQuoteTimePatch(sec) {
+  return normalizeQuoteTimePatch(
+    sec?.quote_time ??
+    sec?.quoteTime ??
+    sec?.regularMarketTime ??
+    sec?.regular_market_time ??
+    sec?.price_time ??
+    sec?.updated_at
+  );
+}
+
+function isTodayMarketQuotePatch(sym) {
+  const s = state.securities?.[sym];
+  const quoteTime = getQuoteTimePatch(s);
+  if (!quoteTime) return false;
+  const twn = getTWNTime();
+  const q = new Date(quoteTime.getTime() + (8 * 60 + quoteTime.getTimezoneOffset()) * 60000);
+  const sameDay = q.toISOString().slice(0, 10) === twn.toISOString().slice(0, 10);
+  const mins = q.getHours() * 60 + q.getMinutes();
+  return sameDay && mins >= 9 * 60;
+}
+
+function getExecutionBlockReasonPatch(sym, side) {
+  const now = getTWNTime();
+  if (!isMarketOpenPatch(now)) return '非交易時段委託';
+
+  const s = state.securities?.[sym];
+  const price = getSecurityPricePatch(sym);
+  const base = isValidPricePatch(s?.base) ? +s.base : null;
+  if (price == null || base == null) return '報價或昨收價無效，暫不直接成交';
+  if (!isTodayMarketQuotePatch(sym)) return '尚未取得今天 09:00 後的盤中報價，改列委託';
+
+  const upLimit = base * 1.1;
+  const downLimit = base * 0.9;
+  const changeRate = Number.isFinite(+s.changeRate) ? +s.changeRate : ((price - base) / base * 100);
+
+  if (side === 'buy' && (price >= upLimit * 0.999 || changeRate >= 9.8)) {
+    return '疑似漲停，買入不保證成交，改列委託';
+  }
+  if (side === 'sell' && (price <= downLimit * 1.001 || changeRate <= -9.8)) {
+    return '疑似跌停，賣出不保證成交，改列委託';
+  }
+  return '';
+}
+
+function rebuildPendingOrderStatePatch() {
+  state.pendingApproval = state.orders.filter(o => o.status === 'pending');
+  state.approvedPending = state.orders.filter(o => o.status === 'approved');
+}
+
+function ensurePendingOrderUI() {
+  if (document.getElementById('pending-list')) return;
+  const tradeCards = document.querySelector('#panel-trade .rwd-col-wide');
+  if (!tradeCards) return;
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="card-header">
+      <span class="card-title">委託訂單</span>
+      <span class="badge badge-pending" id="pending-count">0 筆</span>
+    </div>
+    <div id="pending-list"><div class="empty-state">目前沒有待成交委託</div></div>
+  `;
+  tradeCards.appendChild(card);
+}
+
+const originalFetchInitialPricesPatch = fetchInitialPrices;
+fetchInitialPrices = async function fetchInitialPricesPatched() {
+  const { data, error } = await db.from('securities').select('*');
+  if (error || !data) {
+    await originalFetchInitialPricesPatch();
+    return;
+  }
+  data.forEach(item => {
+    const close = Number(item.close ?? item.previousClose ?? item.base ?? item.price);
+    const live = Number(item.price ?? item.regularMarketPrice);
+    const afterClose = checkAfterClose();
+    const preferred = afterClose ? close : live;
+    const initPrice = isValidPricePatch(preferred) ? preferred : (isValidPricePatch(close) ? close : null);
+    const initBase = isValidPricePatch(close) ? close : initPrice;
+    state.securities[item.symbol] = {
+      name: item.name,
+      price: initPrice,
+      base: initBase,
+      vol: +item.vol,
+      type: item.type,
+      grp: item.grp,
+      quote_time: item.quote_time ?? item.quoteTime ?? item.regularMarketTime ?? item.regular_market_time ?? item.price_time ?? item.updated_at
+    };
+  });
+  renderTickers();
+  updateOrderSymbols();
+  updateOrderPrice();
+  renderPositions();
+  updateAllMetrics();
+  updateNavMini();
+};
+
+function ensureAdjustmentUI() {
+  if (document.getElementById('adjust-card')) return;
+  const riskCol = document.querySelector('#panel-risk .rwd-col');
+  if (!riskCol) return;
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = 'adjust-card';
+  card.innerHTML = `
+    <div class="card-header"><span class="card-title">手動股息 / 股數調整</span></div>
+    <div class="card-body">
+      <div class="metric-row">
+        <div class="form-row" style="margin-bottom:0">
+          <label class="form-label">組別</label>
+          <select id="adjust-grp"><option value="etf">ETF 組</option><option value="stock">個股組</option></select>
+        </div>
+        <div class="form-row" style="margin-bottom:0">
+          <label class="form-label">類型</label>
+          <select id="adjust-type"><option value="cash_dividend">股息調整</option><option value="stock_dividend">股數調整</option></select>
+        </div>
+      </div>
+      <div class="metric-row">
+        <div class="form-row" style="margin-bottom:0">
+          <label class="form-label">股票代號</label>
+          <input type="text" id="adjust-symbol" placeholder="例如 6669 或 0050" style="font-family:var(--mono);text-transform:uppercase">
+        </div>
+        <div class="form-row" style="margin-bottom:0">
+          <label class="form-label">調整日期</label>
+          <input type="date" id="adjust-date">
+        </div>
+      </div>
+      <div class="form-row">
+        <label class="form-label">金額或股數</label>
+        <input type="number" id="adjust-value" min="0" step="1" placeholder="股息填金額，股數調整填新增股數">
+      </div>
+      <button class="btn btn-full btn-primary" onclick="submitPortfolioAdjustmentPatch()">新增調整</button>
+    </div>
+  `;
+  riskCol.appendChild(card);
+  const dateEl = document.getElementById('adjust-date');
+  if (dateEl && !dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10);
+}
+
+async function submitPortfolioAdjustmentPatch() {
+  const grp = qs('adjust-grp')?.value || state.group;
+  const eventType = qs('adjust-type')?.value || 'cash_dividend';
+  const symbol = normalizeSymbolInput(qs('adjust-symbol')?.value || '');
+  const eventDate = qs('adjust-date')?.value || new Date().toISOString().slice(0, 10);
+  const value = +(qs('adjust-value')?.value || 0);
+
+  if (!symbol) { toast('請輸入股票代號', 'warn'); return; }
+  if (!value || value <= 0) { toast('請輸入大於 0 的金額或股數', 'warn'); return; }
+  if (!state.groups[grp]?.positions?.some(p => p.symbol === symbol)) {
+    toast('目前沒有持有此商品，無法新增調整', 'warn');
+    return;
+  }
+
+  const ev = {
+    grp,
+    symbol,
+    event_type: eventType,
+    event_date: eventDate,
+    cash_amount: eventType === 'cash_dividend' ? value : 0,
+    share_delta: eventType === 'stock_dividend' ? value : 0
+  };
+  const { error } = await db.from('portfolio_events').insert([ev]);
+  if (error) { toast('新增調整失敗：' + error.message, 'danger'); return; }
+  state.portfolioEvents.push(ev);
+  rebuildPortfolioFromTimeline();
+  updateAllMetrics();
+  renderHistory();
+  qs('adjust-value').value = '';
+  toast(eventType === 'cash_dividend' ? '已新增股息調整' : '已新增股數調整', 'success');
+}
+
+function updateOrderPrice() {
+  const sym = qs('order-symbol').value;
+  const qty = parseInt(qs('order-qty').value) || 0;
+  if (!sym || !state.securities[sym]) {
+    qs('order-price').value = '—';
+    qs('order-amount').value = '—';
+    return;
+  }
+  const price = getSecurityPricePatch(sym);
+  qs('order-price').value = price == null ? '報價失敗' : formatPrice(price);
+  qs('order-amount').value = price == null ? '—' : money(price * qty);
+}
+
+setupRealtime = function setupRealtimePatched() {
+  db.channel('sec-changes')
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'securities' }, payload => {
+      const item = payload.new;
+      const s = state.securities[item.symbol];
+      if (!s) return;
+      const old = s.price;
+      const nextPrice = +item.price;
+      if (!isValidPricePatch(nextPrice)) {
+        console.warn('Ignore invalid realtime price:', item.symbol, item.price);
+        return;
+      }
+      const nextBase = isValidPricePatch(item.base) ? +item.base : s.base;
+      if (Math.abs(nextPrice - old) <= 0.001 && Math.abs(nextBase - s.base) <= 0.001) return;
+      s.price = nextPrice;
+      s.base = nextBase;
+      s.quote_time = item.quote_time ?? item.quoteTime ?? item.regularMarketTime ?? item.regular_market_time ?? item.price_time ?? item.updated_at ?? s.quote_time;
+      s.change = s.price - s.base;
+      s.changeRate = s.base > 0 ? (s.change / s.base) * 100 : 0;
+      flashRow(item.symbol, s.price > old ? 'up' : 'down');
+      refreshPriceOnlyUI([item.symbol]);
+      setText('quote-update-time', nowTime());
+    }).subscribe();
+
+  db.channel('order-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, async () => {
+      await loadOrdersFromDB();
+      rebuildPortfolioFromTimeline();
+      updateAllMetrics();
+      renderHistory();
+      renderTradeReport();
+      renderPerformanceReport();
+      renderPendingList();
+    }).subscribe();
+
+  db.channel('portfolio-event-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'portfolio_events' }, async () => {
+      await loadPortfolioEventsFromDB();
+      rebuildPortfolioFromTimeline();
+      updateAllMetrics();
+      renderHistory();
+      renderTradeReport();
+      renderPerformanceReport();
+    }).subscribe();
+
+  db.channel('corporate-action-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'corporate_actions' }, async () => {
+      await loadDividendForecasts();
+      renderDividendForecastReport();
+    }).subscribe();
+};
+
+function extractQuoteTimePatch(item) {
+  return item?.quote_time ??
+    item?.quoteTime ??
+    item?.regularMarketTime ??
+    item?.regular_market_time ??
+    item?.price_time ??
+    item?.updated_at ??
+    item?.meta?.regularMarketTime ??
+    item?.meta?.firstTradeDate ??
+    null;
+}
+
+triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false) {
+  const dot = qs('price-dot');
+  if (dot) dot.className = '';
+  try {
+    const symbols = Object.keys(state.securities || {});
+    if (!symbols.length) throw new Error('沒有商品可更新');
+    const endpoint = `${supabaseUrl}/functions/v1/stock-yahoo-live`;
+    const debugOn = forceDebug || isDebugPanelEnabled();
+    let updatedCount = 0;
+    const changedSymbols = [];
+
+    const applyQuote = item => {
+      const symbol = String(item?.symbol || '').toUpperCase();
+      const s = state.securities[symbol];
+      if (!s) return;
+      const latestPrice = Number(item?.meta?.regularMarketPrice ?? item?.regularMarketPrice ?? item?.price ?? item?.close);
+      const prevClose = Number(item?.meta?.previousClose ?? item?.previousClose ?? item?.base);
+      if (!isValidPricePatch(latestPrice)) return;
+      const old = Number(s.price || 0);
+      s.price = latestPrice;
+      s.base = isValidPricePatch(prevClose) ? prevClose : s.base;
+      s.quote_time = extractQuoteTimePatch(item) ?? s.quote_time;
+      s.change = s.price - s.base;
+      s.changeRate = s.base > 0 ? (s.change / s.base) * 100 : 0;
+      updatedCount += 1;
+      changedSymbols.push(symbol);
+      if (Math.abs(s.price - old) > 0.001) flashRow(symbol, s.price > old ? 'up' : 'down');
+    };
+
+    let usedBatch = false;
+    try {
+      const batchRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'apikey': supabaseKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols, range: '1d', interval: '1m' })
+      });
+      const batchText = await batchRes.text();
+      const batchData = batchText ? JSON.parse(batchText) : {};
+      const rows = Array.isArray(batchData?.rows) ? batchData.rows
+        : Array.isArray(batchData?.quotes) ? batchData.quotes
+        : Array.isArray(batchData?.results) ? batchData.results
+        : Array.isArray(batchData?.data) ? batchData.data
+        : null;
+      if (batchRes.ok && Array.isArray(rows) && rows.length) {
+        usedBatch = true;
+        rows.forEach(applyQuote);
+      }
+    } catch (err) {
+      if (debugOn) debugLog('batch quote update failed', { error: String(err) });
+    }
+
+    if (!usedBatch) {
+      for (const symbol of symbols) {
+        try {
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'apikey': supabaseKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol, range: '1d', interval: '1m' })
+          });
+          const text = await res.text();
+          const data = text ? JSON.parse(text) : {};
+          if (!res.ok) continue;
+          applyQuote({ ...data, symbol });
+        } catch (err) {
+          if (debugOn) debugLog('single quote update failed', { symbol, error: String(err) });
+        }
+      }
+    }
+
+    refreshPriceOnlyUI(Array.from(new Set(changedSymbols)));
+    refreshTickerColors();
+    if (updatedCount > 0) {
+      if (dot) dot.className = 'live';
+      setText('price-txt', `Yahoo 報價 · ${nowTime()}`);
+      setText('quote-update-time', nowTime());
+    } else {
+      if (dot) dot.className = 'err';
+      setText('price-txt', 'Yahoo 報價未更新');
+    }
+  } catch (e) {
+    console.error('triggerPriceUpdate failed:', e);
+    if (dot) dot.className = 'err';
+    setText('price-txt', 'Yahoo 報價暫時無法取得');
+  }
+};
+
+function submitMarketOrder() {
+  const grp = state.group;
+  const g = state.groups[grp];
+  const rawInput = qs('order-symbol-input').value.trim().toUpperCase();
+  const sym = normalizeSymbolInput(qs('order-symbol').value || rawInput);
+  const qty = parseInt(qs('order-qty').value) || 0;
+  const dir = state.currentDir;
+
+  if (!sym) { toast('請輸入股票代號', 'warn'); return; }
+  if (!state.securities[sym]) {
+    openAddSecurityModal(sym, inferGroupByRawSymbol(rawInput || sym));
+    toast('請先新增商品資料', 'warn');
+    return;
+  }
+  if (!qty || qty < 1) { toast('請輸入有效股數', 'warn'); return; }
+  if (g.frozen) { toast('此組別已凍結，無法交易', 'danger'); return; }
+
+  const execPrice = getSecurityPricePatch(sym);
+  if (execPrice == null) {
+    toast('此商品目前沒有有效報價，請稍後更新報價後再下單', 'danger');
+    return;
+  }
+
+  if (dir === 'sell' && getHeldQtyPatch(grp, sym) < qty) {
+    toast(`持股不足：目前持有 ${getHeldQtyPatch(grp, sym)} 股`, 'danger');
+    return;
+  }
+
+  const amount = Math.round(execPrice * qty);
+  const feeAmount = Math.round(amount * 0.0004);
+  const taxAmount = dir === 'sell' ? Math.round(amount * getSellTaxRate(sym, grp)) : 0;
+  const settlementAmount = dir === 'buy' ? amount + feeAmount + taxAmount : amount - feeAmount - taxAmount;
+  if (dir === 'buy' && g.cash < settlementAmount) {
+    toast(`現金不足：需要 ${money(settlementAmount)}，目前可用 ${money(g.cash)}`, 'danger');
+    return;
+  }
+
+  const constraintErr = checkOrderConstraints(sym, qty, dir, grp);
+  if (constraintErr) { toast('違反交易規則：' + constraintErr, 'danger'); return; }
+
+  const s = state.securities[sym];
+  const blockReason = getExecutionBlockReasonPatch(sym, dir);
+  pendingOrderData = { sym, qty, dir, grp, execPrice, amount, s, marketOpen: !blockReason, blockReason };
+  setText('confirm-dir', dir === 'buy' ? '買入' : '賣出', dir === 'buy' ? 'var(--green)' : 'var(--red)');
+  setText('confirm-sym', sym.replace('.TW', '').replace('.TWO', ''));
+  setText('confirm-qty', qty + ' 股');
+  setText('confirm-price', formatPrice(execPrice));
+  setText('confirm-amount', money(amount));
+  const confirmBtn = qs('confirm-submit-btn');
+  if (confirmBtn) {
+    confirmBtn.className = dir === 'buy' ? 'btn btn-buy' : 'btn btn-sell';
+    confirmBtn.style.flex = '2';
+    confirmBtn.textContent = pendingOrderData.marketOpen ? '確認成交' : '建立委託';
+  }
+  if (blockReason) toast(blockReason, 'warn');
+  qs('modal-order-confirm').classList.add('open');
+}
+
+async function executeMarketOrder() {
+  if (!pendingOrderData) return;
+  const confirmBtn = qs('confirm-submit-btn');
+  const originalText = confirmBtn.textContent;
+  confirmBtn.textContent = '處理中...';
+  confirmBtn.disabled = true;
+
+  const { sym, qty, dir, grp, execPrice, amount, s, marketOpen, blockReason } = pendingOrderData;
+  const feeRate = 0.0004;
+  const feeAmount = Math.round(amount * feeRate);
+  const taxRate = dir === 'sell' ? getSellTaxRate(sym, grp) : 0;
+  const taxAmount = Math.round(amount * taxRate);
+  const settlementAmount = dir === 'buy' ? amount + feeAmount + taxAmount : amount - feeAmount - taxAmount;
+  const status = marketOpen ? 'executed' : 'pending';
+  const tradeDate = marketOpen ? getSettlementDate() : getNextMarketOpenDatePatch();
+
+  const order = {
+    id: uid(),
+    time: marketOpen ? nowTime() : '09:00:00',
+    symbol: sym,
+    name: s.name,
+    qty,
+    side: dir,
+    price: execPrice,
+    amount,
+    grp,
+    status,
+    comment: marketOpen ? '市價直接成交' : (blockReason || '暫不直接成交，改列委託'),
+    settlement_date: tradeDate,
+    settlement_price: marketOpen ? execPrice : null,
+    fee_rate: feeRate,
+    fee_amount: feeAmount,
+    tax_rate: taxRate,
+    tax_amount: taxAmount,
+    settlement_amount: settlementAmount,
+    scorecard: {}
+  };
+
+  const { error } = await db.from('orders').insert([order]);
+  confirmBtn.textContent = originalText;
+  confirmBtn.disabled = false;
+
+  if (error) {
+    toast('訂單寫入失敗：' + error.message, 'danger');
+    closeOrderConfirmModal();
+    return;
+  }
+
+  state.orders.push(normalizeOrderFinancials(order));
+  rebuildPendingOrderStatePatch();
+  rebuildPortfolioFromTimeline();
+  qs('order-qty').value = '1000';
+  updateAllMetrics();
+  renderHistory();
+  renderPendingList();
+  refreshPriceOnlyUI([sym]);
+  toast(status === 'executed' ? '訂單已成交' : `已建立委託：${blockReason || '待成交'}`, status === 'executed' ? 'success' : 'warn');
+  closeOrderConfirmModal();
+}
+
+function renderPendingList() {
+  ensurePendingOrderUI();
+  const list = qs('pending-list');
+  const count = qs('pending-count');
+  if (!list) return;
+  rebuildPendingOrderStatePatch();
+  const pending = [...state.pendingApproval, ...state.approvedPending];
+  if (count) count.textContent = pending.length + ' 筆';
+  if (!pending.length) {
+    list.innerHTML = '<div class="empty-state">目前沒有待成交委託</div>';
+    return;
+  }
+  list.innerHTML = pending.map(o => `
+    <div class="order-item">
+      <div class="order-top">
+        <div style="flex:1;min-width:0;padding-right:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="order-sym">${o.symbol.replace('.TW','').replace('.TWO','')}</span>
+            <span class="badge badge-${o.side}">${o.side === 'buy' ? '買入' : '賣出'}</span>
+            <span class="badge badge-pending">待成交</span>
+          </div>
+          <div class="order-meta">${o.settlement_date || '—'} ${o.time || ''} · ${o.qty} 股 · 委託價 ${formatPrice(o.price)}</div>
+          <div class="order-meta">${o.comment || '委託待成交'}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div class="order-amount">${money(o.amount || 0)}</div>
+          <button class="btn btn-sm btn-sell" style="margin-top:6px;width:100%" onclick="cancelPendingOrderPatch('${o.id}')">取消</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function cancelPendingOrderPatch(id) {
+  const order = state.orders.find(o => o.id === id);
+  if (!order) return;
+  if (!confirm('確定取消這筆委託？')) return;
+  const { error } = await db.from('orders')
+    .update({ status: 'rejected', comment: '取消委託' })
+    .eq('id', id);
+  if (error) {
+    toast('取消委託失敗：' + error.message, 'danger');
+    return;
+  }
+  order.status = 'rejected';
+  order.comment = '取消委託';
+  rebuildPendingOrderStatePatch();
+  renderPendingList();
+  renderHistory();
+  renderTradeReport();
+  toast('已取消委託', 'info');
+}
+
+const originalLoadOrdersFromDBPatch = loadOrdersFromDB;
+loadOrdersFromDB = async function loadOrdersFromDBPatched() {
+  await originalLoadOrdersFromDBPatch();
+  rebuildPendingOrderStatePatch();
+};
+
+const originalUpdateAllMetricsPatch = updateAllMetrics;
+updateAllMetrics = function updateAllMetricsPatched() {
+  originalUpdateAllMetricsPatch();
+  ensureAdjustmentUI();
+  renderPendingList();
+};
+
+renderPerformanceReport = function renderPerformanceReportPatched() {
+  const el = qs('report-performance');
+  if (!el) return;
+  const rows = ['etf', 'stock'].map(grp => {
+    const g = state.groups[grp];
+    const mv = g.positions.reduce((sum, p) => {
+      const cur = getSecurityPricePatch(p.symbol) ?? +p.avgPrice;
+      return sum + cur * p.qty;
+    }, 0);
+    const totalCost = g.positions.reduce((sum, p) => sum + (+p.avgPrice) * p.qty, 0);
+    const unrealized = mv - totalCost;
+    const realized = (+g.realizedPnl || 0);
+    const totalPnl = realized + unrealized;
+    const retPct = INITIAL > 0 ? totalPnl / INITIAL * 100 : 0;
+    return { name: g.name, mv, totalCost, unrealized, realized, totalPnl, retPct };
+  });
+  el.innerHTML = rows.map(r => `
+    <div class="order-item">
+      <div class="order-top">
+        <div style="flex:1;min-width:0;padding-right:8px">
+          <div class="order-sym">${r.name}</div>
+          <div class="order-meta">市值 ${money(r.mv)} · 成本 ${money(r.totalCost)}</div>
+          <div class="order-meta">未實現 <span style="color:${r.unrealized >= 0 ? 'var(--green)' : 'var(--red)'}">${money(r.unrealized)}</span></div>
+          <div class="order-meta">已實現/股息 <span style="color:${r.realized >= 0 ? 'var(--green)' : 'var(--red)'}">${money(r.realized)}</span></div>
+        </div>
+        <div class="order-amount" style="color:${r.totalPnl >= 0 ? 'var(--green)' : 'var(--red)'}">${money(r.totalPnl)}<div style="font-size:12px">${pct(r.retPct)}</div></div>
+      </div>
+    </div>
+  `).join('');
+};
+
+function ensureTradeReportFiltersUI() {
+  if (document.getElementById('trade-report-filter-row')) return;
+  const report = qs('report-trades');
+  if (!report) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'trade-report-filter-row';
+  wrap.className = 'card-body';
+  wrap.style.paddingBottom = '0';
+  wrap.innerHTML = `
+    <div class="metric-row" style="margin-bottom:10px">
+      <div>
+        <label class="form-label">成交日期</label>
+        <input type="date" id="trade-report-date" onchange="renderTradeReport()">
+      </div>
+      <div>
+        <label class="form-label">組別</label>
+        <select id="trade-report-grp" onchange="renderTradeReport()">
+          <option value="all">全部</option>
+          <option value="etf">ETF</option>
+          <option value="stock">個股</option>
+        </select>
+      </div>
+    </div>
+  `;
+  report.parentNode.insertBefore(wrap, report);
+}
+
+renderTradeReport = function renderTradeReportPatched() {
+  const list = qs('report-trades');
+  if (!list) return;
+  ensureTradeReportFiltersUI();
+
+  const dateValue = qs('trade-report-date')?.value || '';
+  const grpValue = qs('trade-report-grp')?.value || 'all';
+  const orders = state.orders
+    .filter(o => o.status === 'executed')
+    .filter(o => !dateValue || o.settlement_date === dateValue)
+    .filter(o => grpValue === 'all' || (o.group || o.grp) === grpValue)
+    .sort((a, b) => `${b.settlement_date || ''} ${b.time || ''}`.localeCompare(`${a.settlement_date || ''} ${a.time || ''}`));
+
+  const count = qs('trade-report-count');
+  if (count) count.textContent = orders.length + ' 筆';
+
+  if (!orders.length) {
+    list.innerHTML = '<div class="empty-state">此條件下沒有成交紀錄</div>';
+    return;
+  }
+
+  const renderOrderItem = o => {
+    const grp = o.group || o.grp;
+    return `
+      <div class="order-item">
+        <div class="order-top">
+          <div style="flex:1;min-width:0;padding-right:8px">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span class="order-sym">${o.symbol.replace('.TW','').replace('.TWO','')}</span>
+              <span class="badge badge-${o.side}">${o.side === 'buy' ? '買入' : '賣出'}</span>
+              <span class="badge badge-${grp}">${grp === 'etf' ? 'ETF' : '個股'}</span>
+            </div>
+            <div class="order-meta">${o.settlement_date || '—'} ${o.time || ''} · ${o.qty} 股 · 成交價 ${formatPrice(o.settlement_price || o.price)}</div>
+            <div class="order-meta">手續費 ${money(o.fee_amount || 0)} · 交易稅 ${money(o.tax_amount || 0)}${o.comment ? ` · ${o.comment}` : ''}</div>
+          </div>
+          <div class="order-amount">${money(o.amount || 0)}</div>
+        </div>
+      </div>
+    `;
+  };
+
+  const shown = state.tradeReportExpanded ? orders : orders.slice(0, 1);
+  let html = shown.map(renderOrderItem).join('');
+  if (orders.length > 1 && !state.tradeReportExpanded) {
+    html += '<div class="settle-section-hdr">按右上角 + 顯示更多</div>';
+  }
+  list.innerHTML = html;
+};
+
+// ===== SimTrade minimal patch END =====
 init();
 </script>
 
