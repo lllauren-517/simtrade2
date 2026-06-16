@@ -993,6 +993,45 @@ input[type="date"]:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,1
 const supabaseUrl = 'https://murynwlbdgxkimfgunfx.supabase.co';
 const supabaseKey = 'sb_publishable__l1D3S4Rzwp3go_Gf_R24g_d_UjaFmG';
 const db = supabase.createClient(supabaseUrl, supabaseKey);
+function normalizeOrderRow(row){
+  if(!row) return row;
+  return {
+    ...row,
+    grp: row.grp ?? row.group,
+    settlement_date: row.settlement_date ?? row.settlementdate ?? null,
+    settlement_price: row.settlement_price ?? row.settlementprice ?? null,
+    fee_rate: row.fee_rate ?? row.feerate ?? 0,
+    fee_amount: row.fee_amount ?? row.feeamount ?? 0,
+    tax_rate: row.tax_rate ?? row.taxrate ?? 0,
+    tax_amount: row.tax_amount ?? row.taxamount ?? 0,
+    settlement_amount: row.settlement_amount ?? row.settlementamount ?? 0,
+    created_at: row.created_at ?? row.createdat ?? null,
+  };
+}
+function normalizePortfolioEventRow(row){
+  if(!row) return row;
+  return {
+    ...row,
+    event_type: row.event_type ?? row.eventtype ?? null,
+    event_date: row.event_date ?? row.eventdate ?? null,
+    cash_amount: row.cash_amount ?? row.cashamount ?? 0,
+    share_delta: row.share_delta ?? row.sharedelta ?? 0,
+    created_at: row.created_at ?? row.createdat ?? null,
+  };
+}
+function normalizeCorporateActionRow(row){
+  if(!row) return row;
+  return {
+    ...row,
+    grp: row.grp ?? row.group,
+    ex_date: row.ex_date ?? row.exDate ?? row.exdate ?? null,
+    pay_date: row.pay_date ?? row.payDate ?? row.paydate ?? null,
+    cash_dividend_per_share: row.cash_dividend_per_share ?? row.cashDividend ?? row.cashdividendpershare ?? 0,
+    stock_dividend_ratio: row.stock_dividend_ratio ?? row.stockDividendRatio ?? row.stockdividendratio ?? 0,
+    action_type: row.action_type ?? row.actionType ?? row.actiontype ?? null,
+    created_at: row.created_at ?? row.createdat ?? null,
+  };
+}
 
 // ========== STATE ==========
 const INITIAL         = 200_000_000;  // 2億
@@ -1224,7 +1263,7 @@ async function fetchInitialPrices() {
   const { data, error } = await db.from('securities').select('*');
   if (error || !data) return;
   data.forEach(item => {
-    const close = Number(item.close ?? item.previousClose ?? item.base ?? item.price ?? 0);
+    const close = Number(item.close ?? item.previous_close ?? item.base ?? item.price ?? 0);
     const live = Number(item.price ?? item.regularMarketPrice ?? 0);
     const afterClose = checkAfterClose();
     const initPrice = Number.isFinite(afterClose ? close : live) && (afterClose ? close : live) > 0 ? (afterClose ? close : live) : close;
@@ -1873,8 +1912,8 @@ function getSellTaxRate(symbol, grp) {
 }
 
 function normalizeOrderFinancials(order) {
-  const grp = order.group || order.grp;
-  const execPrice = +(order.settlement_price ?? order.settlementprice ?? order.price ?? 0);
+  const grp = order.grp || order.group;
+  const execPrice = +(order.settlement_price ?? order.settlement_price ?? order.price ?? 0);
   const amount = +(order.amount ?? Math.round(execPrice * (+order.qty || 0)));
   const feeRate = +(order.fee_rate ?? 0.0004);
   const feeAmount = +(order.fee_amount ?? Math.round(amount * feeRate));
@@ -3489,7 +3528,7 @@ function exportRiskReport() {
 function replayOrder(order) {
   normalizeOrderFinancials(order);
 
-  const grp = order.group || order.grp;
+  const grp = order.grp || order.group;
   const g = state.groups[grp];
   if (!g) return;
   if (!g.replayMarks) g.replayMarks = {};
@@ -3608,7 +3647,7 @@ async function loadOrdersFromDB() {
     qty: +o.qty, side: o.side, price: +o.price, amount: +o.amount,
     group: o.grp, grp: o.grp, status: o.status, comment: o.comment,
     settlement_date: o.settlementdate || o.settlement_date || null,
-    settlement_price: o.settlementprice ? +o.settlementprice : (o.settlement_price ? +o.settlement_price : null),
+    settlement_price: o.settlementprice ? +o.settlement_price: (o.settlement_price ? +o.settlement_price : null),
     fee_rate: o.fee_rate,
     fee_amount: o.fee_amount,
     tax_rate: o.tax_rate,
@@ -3710,7 +3749,7 @@ function getHeldQtyPatch(grp, sym) {
 }
 
 function normalizeCleanSymbolPatch(sym) {
-  return String(sym || '').toUpperCase().replace('.TW', '').replace('.TWO', '');
+  return String(sym || '').toUpperCase().replace(/\.TWO$/i, '').replace(/\.TW$/i, '');
 }
 
 function resolveOrderSymbolPatch(raw, grp = state.group) {
@@ -3728,12 +3767,251 @@ function resolveOrderSymbolPatch(raw, grp = state.group) {
     ...Object.keys(state.securities || {}).filter(key => normalizeCleanSymbolPatch(key) === clean)
   ].filter(Boolean);
 
-  const visibleHit = candidates.find(sym => visible.has(sym) && state.securities[sym]);
-  if (visibleHit) return visibleHit;
+  const visiblePricedHit = candidates.find(sym => visible.has(sym) && state.securities[sym] && getSecurityPricePatch(sym) != null);
+  if (visiblePricedHit) return visiblePricedHit;
   const pricedHit = candidates.find(sym => state.securities[sym] && getSecurityPricePatch(sym) != null);
   if (pricedHit) return pricedHit;
+  const visibleHit = candidates.find(sym => visible.has(sym) && state.securities[sym]);
+  if (visibleHit) return visibleHit;
   return candidates.find(sym => state.securities[sym]) || normalized;
 }
+
+function getCurrentOrderSymbolPatch() {
+  const rawInput = qs('order-symbol-input')?.value?.trim()?.toUpperCase() || '';
+  const hidden = qs('order-symbol')?.value || '';
+  return resolveOrderSymbolPatch(hidden || rawInput, state.group);
+}
+
+function normalizeSymbolWithMarketPatch(raw, market = 'TW') {
+  const value = String(raw || '').trim().toUpperCase();
+  if (!value) return '';
+  const clean = normalizeCleanSymbolPatch(value);
+  if (value.endsWith('.TW') || value.endsWith('.TWO')) return value;
+  if (/^\d{4}$/.test(clean) || /^\d{5}[A-Z]?$/.test(clean)) {
+    return clean + (market === 'TWO' ? '.TWO' : '.TW');
+  }
+  return value;
+}
+
+function ensureSecurityMarketSelectPatch() {
+  if (document.getElementById('new-sec-market')) return;
+  const grpEl = qs('new-sec-grp');
+  if (!grpEl) return;
+  const row = document.createElement('div');
+  row.className = 'form-row';
+  row.innerHTML = `
+    <label class="form-label">市場</label>
+    <select id="new-sec-market" onchange="updateAddSecuritySymbolMarketPatch()">
+      <option value="TW">上市 TW</option>
+      <option value="TWO">上櫃 TWO</option>
+    </select>
+  `;
+  grpEl.closest('.form-row')?.insertAdjacentElement('afterend', row);
+}
+
+function updateAddSecuritySymbolMarketPatch() {
+  const el = qs('new-sec-symbol');
+  if (!el) return;
+  const market = qs('new-sec-market')?.value || 'TW';
+  el.value = normalizeSymbolWithMarketPatch(el.value, market);
+}
+
+function hasSymbolReferencesPatch(sym) {
+  const groups = Object.values(state.groups || {});
+  const held = groups.some(g => (g.positions || []).some(p => p.symbol === sym && Number(p.qty || 0) > 0));
+  const ordered = (state.orders || []).some(o => o.symbol === sym);
+  const evented = (state.portfolioEvents || []).some(ev => ev.symbol === sym);
+  return held || ordered || evented;
+}
+
+async function deleteSecurityIfSafePatch(sym) {
+  if (!sym || hasSymbolReferencesPatch(sym)) return false;
+  try {
+    if (typeof db !== 'undefined') await db.from('securities').delete().eq('symbol', sym);
+  } catch (err) {
+    console.warn('delete security failed:', sym, err);
+  }
+  delete state.securities[sym];
+  Object.keys(state.customTickers || {}).forEach(grp => {
+    state.customTickers[grp] = (state.customTickers[grp] || []).filter(x => x !== sym);
+  });
+  saveTickerPrefs();
+  return true;
+}
+
+async function switchOrderSymbolMarketPatch(market) {
+  const raw = qs('order-symbol-input')?.value || qs('order-symbol')?.value || '';
+  const clean = normalizeCleanSymbolPatch(raw);
+  if (!/^\d{4}$/.test(clean)) {
+    toast('目前只支援四碼台股切換上市/上櫃', 'warn');
+    return;
+  }
+  const newSym = normalizeSymbolWithMarketPatch(clean, market);
+  const oldSym = getCurrentOrderSymbolPatch();
+  const oldSec = state.securities?.[oldSym] || {};
+  const grp = inferGroupByRawSymbol(newSym);
+  const type = inferTypeByRawSymbol(newSym);
+  const name = oldSec.name && oldSec.name !== clean ? oldSec.name : suggestSecurityName(newSym);
+  await persistSecurity({ symbol: newSym, name, grp, type, price: 0, base: 0, vol: 0 });
+  state.customTickers[grp] = state.customTickers[grp] || [];
+  if (!state.customTickers[grp].includes(newSym)) state.customTickers[grp].push(newSym);
+  if (oldSym && oldSym !== newSym && !hasSymbolReferencesPatch(oldSym)) {
+    await deleteSecurityIfSafePatch(oldSym);
+  }
+  saveTickerPrefs();
+  const hiddenSym = qs('order-symbol');
+  const rawInput = qs('order-symbol-input');
+  if (hiddenSym) hiddenSym.value = newSym;
+  if (rawInput) rawInput.value = clean;
+  updateOrderSymbols();
+  renderTickers();
+  onSymbolInput();
+  toast(`已切換為 ${newSym}，正在重新抓報價`, 'success');
+  await triggerPriceUpdate(true);
+}
+
+async function saveTickerEditPatch() {
+  const symbol = deleteTickerSymbol;
+  const grp = deleteTickerGrp;
+  const s = state.securities?.[symbol];
+  if (!symbol || !s) return;
+  const name = (qs('edit-ticker-name')?.value || s.name || normalizeCleanSymbolPatch(symbol)).trim();
+  const market = qs('edit-ticker-market')?.value || (symbol.endsWith('.TWO') ? 'TWO' : 'TW');
+  const clean = normalizeCleanSymbolPatch(symbol);
+  const nextSymbol = normalizeSymbolWithMarketPatch(clean, market);
+  if (nextSymbol !== symbol) {
+    if (hasSymbolReferencesPatch(symbol)) {
+      toast('此商品已有持股、委託或調整紀錄，不能直接改市場，請新增正確代號後保留歷史資料。', 'warn');
+      return;
+    }
+    await persistSecurity({
+      symbol: nextSymbol,
+      name,
+      grp: s.grp || grp,
+      type: s.type || inferTypeByRawSymbol(nextSymbol),
+      price: 0,
+      base: 0,
+      vol: 0
+    });
+    state.customTickers[grp] = (state.customTickers[grp] || []).filter(x => x !== symbol);
+    if (!state.customTickers[grp].includes(nextSymbol)) state.customTickers[grp].push(nextSymbol);
+    await deleteSecurityIfSafePatch(symbol);
+  } else {
+    await persistSecurity({
+      ...s,
+      symbol,
+      name,
+      grp: s.grp || grp,
+      type: s.type || inferTypeByRawSymbol(symbol),
+      price: s.price || 0,
+      base: s.base || 0,
+      vol: s.vol || 0
+    });
+  }
+  saveTickerPrefs();
+  updateOrderSymbols();
+  renderTickers();
+  closeDeleteTickerModal();
+  toast('商品資料已更新', 'success');
+  await triggerPriceUpdate(true);
+}
+
+const originalOpenAddSecurityModalPatch = openAddSecurityModal;
+openAddSecurityModal = function openAddSecurityModalMarketPatched(symbol, grp = state.group) {
+  originalOpenAddSecurityModalPatch(symbol, grp);
+  ensureSecurityMarketSelectPatch();
+  const raw = String(symbol || '').trim().toUpperCase();
+  const market = raw.endsWith('.TWO') ? 'TWO' : 'TW';
+  const marketEl = qs('new-sec-market');
+  if (marketEl) marketEl.value = market;
+  const symEl = qs('new-sec-symbol');
+  if (symEl) symEl.value = normalizeSymbolWithMarketPatch(raw || symEl.value, market);
+};
+
+confirmAddSecurity = async function confirmAddSecurityMarketPatched() {
+  const market = qs('new-sec-market')?.value || 'TW';
+  const symbol = normalizeSymbolWithMarketPatch(qs('new-sec-symbol')?.value || '', market);
+  const grp = qs('new-sec-grp')?.value || inferGroupByRawSymbol(symbol);
+  const type = qs('new-sec-type')?.value || inferTypeByRawSymbol(symbol);
+  const name = (qs('new-sec-name')?.value || suggestSecurityName(symbol)).trim();
+  if (!symbol) { toast('請輸入商品代號', 'warn'); return; }
+  await persistSecurity({ symbol, name, grp, type, price: 0, base: 0, vol: 0 });
+  if (!state.customTickers[grp].includes(symbol)) state.customTickers[grp].push(symbol);
+  const clean = normalizeCleanSymbolPatch(symbol);
+  const sibling = symbol.endsWith('.TWO') ? clean + '.TW' : clean + '.TWO';
+  if (state.securities[sibling] && getSecurityPricePatch(sibling) == null && !hasSymbolReferencesPatch(sibling)) {
+    await deleteSecurityIfSafePatch(sibling);
+  }
+  saveTickerPrefs();
+  updateOrderSymbols();
+  renderTickers();
+  const hiddenSym = qs('order-symbol');
+  const rawInput = qs('order-symbol-input');
+  const nameEl = qs('order-symbol-name');
+  if (hiddenSym) hiddenSym.value = symbol;
+  if (rawInput) rawInput.value = normalizeCleanSymbolPatch(symbol);
+  if (nameEl) {
+    nameEl.innerHTML = '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green)"></span> ' + name;
+    nameEl.style.color = 'var(--green)';
+  }
+  updateOrderPrice();
+  closeAddSecurityModal();
+  closeAddTickerModal();
+  toast(`已新增 ${symbol} 並加入報價`, 'success');
+  await triggerPriceUpdate(true);
+};
+
+const originalConfirmAddTickerPatch = confirmAddTicker;
+confirmAddTicker = function confirmAddTickerPatched() {
+  const input = qs('add-ticker-input');
+  const raw = (input?.value || '').trim().toUpperCase();
+  if (!raw) { toast('請輸入商品代號', 'warn'); return; }
+  const clean = normalizeCleanSymbolPatch(raw);
+  const normalized = normalizeSymbolInput(raw);
+  const grp = inferGroupByRawSymbol(raw);
+  const candidates = [normalized, raw, clean + '.TW', clean + '.TWO'].filter(Boolean);
+  const pricedFound = candidates.find(sym => state.securities[sym] && state.securities[sym].grp === grp && getSecurityPricePatch(sym) != null);
+  if (pricedFound) {
+    if (!state.customTickers[grp].includes(pricedFound)) {
+      state.customTickers[grp].push(pricedFound);
+      saveTickerPrefs();
+    }
+    closeAddTickerModal();
+    renderTickers();
+    toast(`已加入 ${normalizeCleanSymbolPatch(pricedFound)} 商品報價`, 'success');
+    return;
+  }
+  const found = candidates.find(sym => state.securities[sym] && state.securities[sym].grp === grp);
+  if (found && /^\d{4}$/.test(clean) && getSecurityPricePatch(found) == null) {
+    closeAddTickerModal();
+    openAddSecurityModal(found, grp);
+    toast('既有商品報價無效，可在新增視窗修正上市/上櫃或名稱', 'warn');
+    return;
+  }
+  return originalConfirmAddTickerPatch();
+};
+
+const originalOpenDeleteTickerModalPatch = openDeleteTickerModal;
+openDeleteTickerModal = function openManageTickerModalPatch(symbol, grp = state.group) {
+  originalOpenDeleteTickerModalPatch(symbol, grp);
+  const s = state.securities?.[symbol];
+  const holder = qs('delete-ticker-name');
+  if (!holder || !s) return;
+  const market = symbol.endsWith('.TWO') ? 'TWO' : 'TW';
+  const marketDisabled = hasSymbolReferencesPatch(symbol) ? 'disabled' : '';
+  holder.innerHTML = `
+    <div style="margin-bottom:10px">${symbol}${s.name ? ' · ' + s.name : ''}</div>
+    <label class="form-label" style="margin-top:8px">商品名稱</label>
+    <input id="edit-ticker-name" type="text" value="${String(s.name || '').replace(/"/g, '&quot;')}" style="width:100%;margin-bottom:10px">
+    <label class="form-label">市場</label>
+    <select id="edit-ticker-market" ${marketDisabled} style="width:100%;margin-bottom:10px">
+      <option value="TW" ${market === 'TW' ? 'selected' : ''}>上市 TW</option>
+      <option value="TWO" ${market === 'TWO' ? 'selected' : ''}>上櫃 TWO</option>
+    </select>
+    ${marketDisabled ? '<div class="field-hint" style="color:var(--amber);margin-bottom:10px">已有持股、委託或調整紀錄，只能改名稱，不能直接改市場。</div>' : ''}
+    <button class="btn btn-primary" style="width:100%;margin-bottom:10px" onclick="saveTickerEditPatch()">儲存商品資料</button>
+  `;
+};
 
 function isTradingDayPatch(d = getTWNTime()) {
   const day = d.getDay();
@@ -3746,11 +4024,30 @@ function isMarketOpenPatch(d = getTWNTime()) {
   return mins >= 9 * 60 && mins < 13 * 60 + 30;
 }
 
+function isAfterMarketClosePatch(d = getTWNTime()) {
+  if (!isTradingDayPatch(d)) return false;
+  return getMarketMinutesPatch(d) >= 13 * 60 + 30;
+}
+
 function getNextMarketOpenDatePatch(baseDate = getTWNTime()) {
   const d = new Date(baseDate);
   const mins = d.getHours() * 60 + d.getMinutes();
   if (isTradingDayPatch(d) && mins < 9 * 60) return d.toISOString().slice(0, 10);
   return nextTradingDay(d);
+}
+
+function getPendingOrderDatePatch(blockReason = '') {
+  const now = getTWNTime();
+  if (isMarketOpenPatch(now)) return now.toISOString().slice(0, 10);
+  return getNextMarketOpenDatePatch(now);
+}
+
+function isIntradayPendingReasonPatch(comment = '') {
+  return /疑似漲停|疑似跌停|盤中報價|報價/.test(String(comment || ''));
+}
+
+function isDayOrderPatch(order) {
+  return isIntradayPendingReasonPatch(order?.comment) || /當日委託|盤中/.test(String(order?.order_type || ''));
 }
 
 function getMarketMinutesPatch(d = getTWNTime()) {
@@ -3803,11 +4100,33 @@ function getExecutionBlockReasonPatch(sym, side) {
   const downLimit = base * 0.9;
   const changeRate = Number.isFinite(+s.changeRate) ? +s.changeRate : ((price - base) / base * 100);
 
-  if (side === 'buy' && (price >= upLimit * 0.999 || changeRate >= 9.8)) {
+  if (side === 'buy' && (price >= upLimit * 0.995 || changeRate >= 9.5)) {
     return '疑似漲停，買入不保證成交，改列委託';
   }
-  if (side === 'sell' && (price <= downLimit * 1.001 || changeRate <= -9.8)) {
+  if (side === 'sell' && (price <= downLimit * 1.005 || changeRate <= -9.5)) {
     return '疑似跌停，賣出不保證成交，改列委託';
+  }
+  return '';
+}
+
+function getPendingExecutionBlockReasonPatch(sym, side) {
+  const now = getTWNTime();
+  if (!isMarketOpenPatch(now)) return '非交易時段委託';
+
+  const s = state.securities?.[sym];
+  const price = getSecurityPricePatch(sym);
+  const base = isValidPricePatch(s?.base) ? +s.base : null;
+  if (price == null || base == null) return '報價或昨收價無效，暫不成交';
+
+  const upLimit = base * 1.1;
+  const downLimit = base * 0.9;
+  const changeRate = Number.isFinite(+s.changeRate) ? +s.changeRate : ((price - base) / base * 100);
+
+  if (side === 'buy' && (price >= upLimit * 0.995 || changeRate >= 9.5)) {
+    return '疑似漲停，買入不保證成交，維持委託';
+  }
+  if (side === 'sell' && (price <= downLimit * 1.005 || changeRate <= -9.5)) {
+    return '疑似跌停，賣出不保證成交，維持委託';
   }
   return '';
 }
@@ -3841,7 +4160,7 @@ fetchInitialPrices = async function fetchInitialPricesPatched() {
     return;
   }
   data.forEach(item => {
-    const close = Number(item.close ?? item.previousClose ?? item.base ?? item.price);
+    const close = Number(item.close ?? item.previous_close ?? item.base ?? item.price);
     const live = Number(item.price ?? item.regularMarketPrice);
     const afterClose = checkAfterClose();
     const preferred = afterClose ? close : live;
@@ -3854,7 +4173,7 @@ fetchInitialPrices = async function fetchInitialPricesPatched() {
       vol: +item.vol,
       type: item.type,
       grp: item.grp,
-      quote_time: item.quote_time ?? item.quoteTime ?? item.regularMarketTime ?? item.regular_market_time ?? item.price_time ?? item.updated_at
+      quote_time: item.quote_time ?? item.quote_time ?? item.regularMarketTime ?? item.regular_market_time ?? item.price_time ?? item.updated_at
     };
   });
   renderTickers();
@@ -4005,7 +4324,7 @@ async function voidPortfolioEventPatch(id) {
 }
 
 function updateOrderPrice() {
-  const sym = qs('order-symbol').value;
+  const sym = getCurrentOrderSymbolPatch();
   const qty = parseInt(qs('order-qty').value) || 0;
   if (!sym || !state.securities[sym]) {
     qs('order-price').value = '—';
@@ -4034,6 +4353,40 @@ updateOrderSymbols = function updateOrderSymbolsPatched() {
     }).join('');
 };
 
+renderTickerRow = function renderTickerRowPatched(sym, grp = state.group) {
+  const s = state.securities[sym];
+  if (!s) return '';
+  const g = state.groups[grp];
+  const chgRate = s.changeRate ?? 0;
+  const clr = chgRate === 0 ? 'var(--text)' : (chgRate > 0 ? 'var(--green)' : 'var(--red)');
+  const sign = chgRate === 0 ? '•' : (chgRate > 0 ? '▲' : '▼');
+  const isHeld = g.positions.some(p => p.symbol === sym);
+  const delDisabled = !canDeleteTicker(sym, grp);
+  return `
+    <div class="ticker-row${isHeld ? ' held-row' : ''}"
+         data-symbol="${sym}"
+         ontouchstart="deleteTouchStart(event, '${grp}', '${sym}')"
+         ontouchmove="deleteTouchMove(event)"
+         ontouchend="deleteTouchEnd()"
+         ontouchcancel="deleteTouchCancel()"
+         onpointerdown="deletePointerDown(event, '${grp}', '${sym}')"
+         onpointerup="deletePointerUp()"
+         onpointercancel="deletePointerCancel()"
+         oncontextmenu="deleteContextMenu(event, '${grp}', '${sym}')"
+         onclick="openChartModal('${sym}')">
+      <div class="ticker-left">
+        <div class="ticker-sym">${normalizeCleanSymbolPatch(sym)}</div>
+        <div class="ticker-name">${s.name || ''}${isHeld ? ' · 已持有' : ''}</div>
+      </div>
+      <div class="ticker-right">
+        <div class="ticker-price" style="color:${clr}">${formatPrice(s.price)}</div>
+        <div class="ticker-chg" style="color:${clr}">${sign} ${Math.abs(chgRate).toFixed(2)}%</div>
+      </div>
+      <button type="button" class="ticker-del" onclick="event.stopPropagation(); openDeleteTickerModal('${sym}', '${grp}')" ${delDisabled ? 'disabled style="opacity:.35;cursor:not-allowed"' : ''}>⋯</button>
+    </div>
+  `;
+};
+
 onSymbolInput = function onSymbolInputPatched() {
   const raw = qs('order-symbol-input').value.trim().toUpperCase();
   const nameEl = qs('order-symbol-name');
@@ -4053,7 +4406,13 @@ onSymbolInput = function onSymbolInputPatched() {
 
   if (matchedSec) {
     const price = getSecurityPricePatch(matchedSym);
-    nameEl.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${price == null ? 'var(--amber)' : 'var(--green)'}"></span> ${matchedSec.name || normalizeCleanSymbolPatch(matchedSym)}${price == null ? ' · 報價尚未有效' : ''}`;
+    const clean = normalizeCleanSymbolPatch(matchedSym);
+    const canFlipMarket = price == null && /^\d{4}$/.test(clean) && !hasSymbolReferencesPatch(matchedSym);
+    const nextMarket = matchedSym.endsWith('.TWO') ? 'TW' : 'TWO';
+    const fixBtn = canFlipMarket
+      ? ` <button class="btn btn-sm" style="margin-left:8px;padding:4px 8px" onclick="event.preventDefault(); switchOrderSymbolMarketPatch('${nextMarket}')">改成${nextMarket === 'TWO' ? '上櫃 TWO' : '上市 TW'}</button>`
+      : '';
+    nameEl.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${price == null ? 'var(--amber)' : 'var(--green)'}"></span> ${matchedSec.name || clean}${price == null ? ' · 報價尚未有效' : ''}${fixBtn}`;
     nameEl.style.color = price == null ? 'var(--amber)' : 'var(--green)';
     hiddenSym.value = matchedSym;
   } else {
@@ -4083,7 +4442,7 @@ setupRealtime = function setupRealtimePatched() {
       if (Math.abs(nextPrice - old) <= 0.001 && Math.abs(nextBase - s.base) <= 0.001) return;
       s.price = nextPrice;
       s.base = nextBase;
-      s.quote_time = item.quote_time ?? item.quoteTime ?? item.regularMarketTime ?? item.regular_market_time ?? item.price_time ?? item.updated_at ?? s.quote_time;
+      s.quote_time = item.quote_time ?? item.quote_time ?? item.regularMarketTime ?? item.regular_market_time ?? item.price_time ?? item.updated_at ?? s.quote_time;
       s.change = s.price - s.base;
       s.changeRate = s.base > 0 ? (s.change / s.base) * 100 : 0;
       flashRow(item.symbol, s.price > old ? 'up' : 'down');
@@ -4152,7 +4511,7 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
       const old = Number(s.price || 0);
       s.price = latestPrice;
       s.base = isValidPricePatch(prevClose) ? prevClose : s.base;
-      s.quote_time = extractQuoteTimePatch(item) ?? s.quote_time;
+      s.quote_time = extractQuoteTimePatch(item) ?? (isMarketOpenPatch() ? new Date().toISOString() : s.quote_time);
       s.change = s.price - s.base;
       s.changeRate = s.base > 0 ? (s.change / s.base) * 100 : 0;
       updatedCount += 1;
@@ -4165,7 +4524,7 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
       const batchRes = await fetch(endpoint, {
         method: 'POST',
         headers: { 'apikey': supabaseKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbols, range: '1d', interval: '1m' })
+        body: JSON.stringify({ symbols: symbols, range: '1d', interval: '1m' })
       });
       const batchText = await batchRes.text();
       const batchData = batchText ? JSON.parse(batchText) : {};
@@ -4206,9 +4565,11 @@ triggerPriceUpdate = async function triggerPriceUpdatePatched(forceDebug = false
       if (dot) dot.className = 'live';
       setText('price-txt', `Yahoo 報價 · ${nowTime()}`);
       setText('quote-update-time', nowTime());
+      await tryExecutePendingOrdersPatch();
     } else {
       if (dot) dot.className = 'err';
       setText('price-txt', 'Yahoo 報價未更新');
+      await expireDayOrdersAfterClosePatch();
     }
   } catch (e) {
     console.error('triggerPriceUpdate failed:', e);
@@ -4221,7 +4582,7 @@ function submitMarketOrder() {
   const grp = state.group;
   const g = state.groups[grp];
   const rawInput = qs('order-symbol-input').value.trim().toUpperCase();
-  const sym = normalizeSymbolInput(qs('order-symbol').value || rawInput);
+  const sym = getCurrentOrderSymbolPatch();
   const qty = parseInt(qs('order-qty').value) || 0;
   const dir = state.currentDir;
 
@@ -4261,7 +4622,7 @@ function submitMarketOrder() {
   const blockReason = getExecutionBlockReasonPatch(sym, dir);
   pendingOrderData = { sym, qty, dir, grp, execPrice, amount, s, marketOpen: !blockReason, blockReason };
   setText('confirm-dir', dir === 'buy' ? '買入' : '賣出', dir === 'buy' ? 'var(--green)' : 'var(--red)');
-  setText('confirm-sym', sym.replace('.TW', '').replace('.TWO', ''));
+  setText('confirm-sym', normalizeCleanSymbolPatch(sym));
   setText('confirm-qty', qty + ' 股');
   setText('confirm-price', formatPrice(execPrice));
   setText('confirm-amount', money(amount));
@@ -4289,7 +4650,7 @@ async function executeMarketOrder() {
   const taxAmount = Math.round(amount * taxRate);
   const settlementAmount = dir === 'buy' ? amount + feeAmount + taxAmount : amount - feeAmount - taxAmount;
   const status = marketOpen ? 'executed' : 'pending';
-  const tradeDate = marketOpen ? getSettlementDate() : getNextMarketOpenDatePatch();
+  const tradeDate = marketOpen ? getSettlementDate() : getPendingOrderDatePatch(blockReason);
 
   const order = {
     id: uid(),
@@ -4354,7 +4715,7 @@ function renderPendingList() {
       <div class="order-top">
         <div style="flex:1;min-width:0;padding-right:8px">
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <span class="order-sym">${o.symbol.replace('.TW','').replace('.TWO','')}</span>
+            <span class="order-sym">${normalizeCleanSymbolPatch(o.symbol)}</span>
             <span class="badge badge-${o.side}">${o.side === 'buy' ? '買入' : '賣出'}</span>
             <span class="badge badge-pending">待成交</span>
           </div>
@@ -4463,6 +4824,123 @@ async function cancelPendingOrderPatch(id) {
   renderHistory();
   renderTradeReport();
   toast('已取消委託', 'info');
+}
+
+async function expireDayOrdersAfterClosePatch() {
+  const now = getTWNTime();
+  if (!isAfterMarketClosePatch(now)) return 0;
+  rebuildPendingOrderStatePatch();
+  const today = now.toISOString().slice(0, 10);
+  const targets = [...state.pendingApproval, ...state.approvedPending]
+    .filter(o => (o.settlement_date || today) <= today)
+    .filter(o => isDayOrderPatch(o) || (o.settlement_date || '') === today);
+  if (!targets.length) return 0;
+
+  let expiredCount = 0;
+  for (const order of targets) {
+    const patch = {
+      status: 'expired',
+      comment: '當日委託收盤後自動失效'
+    };
+    const { error } = await db.from('orders').update(patch).eq('id', order.id);
+    if (error) {
+      console.warn('expire day order failed', order.id, error);
+      continue;
+    }
+    Object.assign(order, patch);
+    expiredCount += 1;
+  }
+
+  if (expiredCount > 0) {
+    rebuildPendingOrderStatePatch();
+    renderPendingList();
+    renderHistory();
+    renderTradeReport();
+    toast(`已自動失效 ${expiredCount} 筆當日委託`, 'info');
+  }
+  return expiredCount;
+}
+
+async function tryExecutePendingOrdersPatch(changedSymbols = []) {
+  if (isAfterMarketClosePatch()) {
+    await expireDayOrdersAfterClosePatch();
+    return;
+  }
+  if (!isMarketOpenPatch()) return;
+  rebuildPendingOrderStatePatch();
+  const changed = new Set((changedSymbols || []).map(String));
+  const today = getTWNTime().toISOString().slice(0, 10);
+  const candidates = [...state.pendingApproval, ...state.approvedPending]
+    .filter(o => !changed.size || changed.has(o.symbol) || changed.has(resolveOrderSymbolPatch(o.symbol, getOrderGroupPatch(o))));
+  let executedCount = 0;
+
+  for (const order of candidates) {
+    const grp = getOrderGroupPatch(order);
+    const sym = resolveOrderSymbolPatch(order.symbol, grp);
+    const side = order.side;
+    const qty = Number(order.qty || 0);
+    if (!sym || !state.securities[sym] || !qty) continue;
+    if (order.settlement_date && order.settlement_date > today && !isIntradayPendingReasonPatch(order.comment)) continue;
+
+    const blockReason = getPendingExecutionBlockReasonPatch(sym, side);
+    if (blockReason) {
+      order.comment = blockReason;
+      continue;
+    }
+
+    const price = getSecurityPricePatch(sym);
+    if (price == null) continue;
+    const amount = Math.round(price * qty);
+    const feeRate = Number(order.fee_rate ?? 0.0004);
+    const feeAmount = Math.round(amount * feeRate);
+    const taxRate = side === 'sell' ? Number(order.tax_rate ?? getSellTaxRate(sym, grp)) : 0;
+    const taxAmount = Math.round(amount * taxRate);
+    const settlementAmount = side === 'buy'
+      ? amount + feeAmount + taxAmount
+      : amount - feeAmount - taxAmount;
+    if (side === 'buy' && state.groups?.[grp] && state.groups[grp].cash < settlementAmount) {
+      order.comment = '現金不足，委託暫不成交';
+      continue;
+    }
+    if (side === 'sell' && getHeldQtyPatch(grp, sym) < qty) {
+      order.comment = '持股不足，委託暫不成交';
+      continue;
+    }
+
+    const patch = {
+      status: 'executed',
+      time: nowTime(),
+      price,
+      amount,
+      settlement_price: price,
+      fee_rate: feeRate,
+      fee_amount: feeAmount,
+      tax_rate: taxRate,
+      tax_amount: taxAmount,
+      settlement_amount: settlementAmount,
+      comment: '委託於盤中報價取得後成交',
+      settlement_date: today
+    };
+    const { error } = await db.from('orders').update(patch).eq('id', order.id);
+    if (error) {
+      console.warn('execute pending order failed', order.id, error);
+      continue;
+    }
+    Object.assign(order, patch);
+    executedCount += 1;
+  }
+
+  if (executedCount > 0) {
+    rebuildPendingOrderStatePatch();
+    rebuildPortfolioFromTimeline();
+    updateAllMetrics();
+    renderHistory();
+    renderTradeReport();
+    renderPendingList();
+    toast(`已成交 ${executedCount} 筆委託`, 'success');
+  } else {
+    renderPendingList();
+  }
 }
 
 const originalLoadOrdersFromDBPatch = loadOrdersFromDB;
@@ -4577,7 +5055,7 @@ renderTradeReport = function renderTradeReportPatched() {
         <div class="order-top">
           <div style="flex:1;min-width:0;padding-right:8px">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <span class="order-sym">${o.symbol.replace('.TW','').replace('.TWO','')}</span>
+              <span class="order-sym">${normalizeCleanSymbolPatch(o.symbol)}</span>
               <span class="badge badge-${o.side}">${o.side === 'buy' ? '買入' : '賣出'}</span>
               <span class="badge badge-${grp}">${grp === 'etf' ? 'ETF' : '個股'}</span>
             </div>
